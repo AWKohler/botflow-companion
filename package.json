@@ -1,0 +1,12 @@
+{
+  "name": "botflow-companion",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Local macOS agent bridging Botflow to a USB-connected iPhone (device install/launch).",
+  "bin": { "botflow-companion": "./server.mjs" },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

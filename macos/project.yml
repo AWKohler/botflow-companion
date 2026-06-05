@@ -1,0 +1,24 @@
+name: BotflowCompanion
+options:
+  bundleIdPrefix: com.botflow
+  deploymentTarget:
+    macOS: "14.0"
+targets:
+  BotflowCompanion:
+    type: application
+    platform: macOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Botflow Companion
+        # Menu-bar app: no Dock icon, no main window chrome.
+        LSUIElement: true
+        # Allow http://127.0.0.1 calls to the local engine.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        # Dev tool: no sandbox so it can spawn the engine + reach loopback.
+        ENABLE_HARDENED_RUNTIME: false
+        CODE_SIGN_IDENTITY: "-"

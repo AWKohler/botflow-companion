@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""
+Botflow Companion engine.
+
+Local daemon on 127.0.0.1:17321 that bridges Botflow (browser) to a
+USB-connected iPhone. It owns the things that must happen on the user's own
+machine: Apple ID auth (no Xcode), code-signing for the device, and install via
+`devicectl`. The browser drives it through the contract in the web UI
+(iphone-device-runner.tsx); the native SwiftUI app drives Apple ID login.
+
+macOS-first; cross-platform in mind:
+  - signing core = vendored apple_account.py (Apple-ID SRP + native AOSKit
+    anisette + free cert/profile + re-sign). Windows later: swap anisette to a
+    server and install via libimobiledevice instead of devicectl.
+
+Endpoints:
+  GET  /botflow/v1/health
+  GET  /botflow/v1/devices
+  GET  /botflow/v1/auth/status
+  POST /botflow/v1/auth/login     { appleId, password }   -> { ok } | { needs2fa, type }
+  POST /botflow/v1/auth/2fa       { code }                 -> { ok, team }
+  POST /botflow/v1/auth/logout
+  POST /botflow/v1/install        { deviceId, ipaUrl? , ipaPath? } -> { jobId }
+  GET  /botflow/v1/install/:jobId
+"""
+
+import json
+import os
+import sys
+import threading
+import traceback
+import subprocess
+import tempfile
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+# Vendored signer (apple_account.py + native anisette helper live next to us).
+sys.path.insert(0, str(Path(__file__).parent / "signer"))
+import apple_account  # noqa: E402  (AppleSigner, DeveloperPortal, ...)
+
+HOST = "127.0.0.1"
+PORT = 17321
+APP_NAME = "Botflow Companion"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Session + job state (in-memory; re-login on restart for now)
+# ──────────────────────────────────────────────────────────────────────────────
+_lock = threading.Lock()
+SESSION = {
+    "signer": None,      # logged-in AppleSigner
+    "appleId": None,
+    "team": None,
+    # transient, only during the 2FA window:
+    "_pending_signer": None,
+    "_pending_password": None,
+    "_pending_2fa_type": None,
+}
+JOBS = {}  # jobId -> { jobId, state, message, error, logs[] }
+
+
+def log(*a):
+    print(f"[companion {time.strftime('%H:%M:%S')}]", *a, flush=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Devices (xcrun devicectl)
+# ──────────────────────────────────────────────────────────────────────────────
+def _device_type(platform_, dev_type):
+    p = (platform_ or "").lower()
+    t = (dev_type or "").lower()
+    if p == "ios" or t == "iphone":
+        return "iphone"
+    if t == "ipad":
+        return "ipad"
+    if p == "tvos" or "tv" in t:
+        return "apple_tv"
+    return "unknown"
+
+
+def list_devices():
+    out = Path(tempfile.mkdtemp(prefix="botflow-companion-")) / "devs.json"
+    subprocess.run(
+        ["xcrun", "devicectl", "list", "devices", "--json-output", str(out)],
+        capture_output=True, timeout=20, check=False,
+    )
+    if not out.exists():
+        return []
+    data = json.loads(out.read_text())
+    devices = []
+    for d in data.get("result", {}).get("devices", []):
+        dp = d.get("deviceProperties", {})
+        hp = d.get("hardwareProperties", {})
+        cp = d.get("connectionProperties", {})
+        udid = hp.get("udid")
+        if not udid or cp.get("pairingState") != "paired":
+            continue
+        t = _device_type(hp.get("platform"), hp.get("deviceType"))
+        if t not in ("iphone", "ipad"):
+            continue
+        devices.append({
+            "id": udid,
+            "name": dp.get("name") or "iPhone",
+            "osVersion": dp.get("osVersionNumber") or "",
+            "type": t,
+        })
+    return devices
+
+
+def xcode_present():
+    r = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True)
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Apple ID auth (drives the vendored AppleSigner; 2FA over two requests)
+# ──────────────────────────────────────────────────────────────────────────────
+def _extract_team(signer):
+    """Best-effort team label after login."""
+    try:
+        signer.portal.select_team()
+    except Exception:
+        pass
+    for attr in ("team", "team_id", "selected_team"):
+        v = getattr(signer.portal, attr, None)
+        if isinstance(v, dict):
+            return v.get("name") or v.get("teamId")
+        if isinstance(v, str):
+            return v
+    return None
+
+
+def _finalize_login(signer, apple_id):
+    signer.auth.get_xcode_token()
+    signer.portal = apple_account.DeveloperPortal(signer.auth)
+    team = _extract_team(signer)
+    with _lock:
+        SESSION["signer"] = signer
+        SESSION["appleId"] = apple_id
+        SESSION["team"] = team
+        SESSION["_pending_signer"] = None
+        SESSION["_pending_password"] = None
+        SESSION["_pending_2fa_type"] = None
+    log(f"logged in as {apple_id} (team={team})")
+    return team
+
+
+def auth_login(apple_id, password):
+    signer = apple_account.AppleSigner()
+    result = signer.auth.authenticate(apple_id, password)
+    status = result["status"]
+    if signer.auth.needs_2fa(status):
+        fa_type = signer.auth.get_2fa_type(status)
+        if fa_type == "trusted_device":
+            signer.auth.send_2fa_trusted_device()
+        else:
+            signer.auth.send_2fa_sms()
+        with _lock:
+            SESSION["_pending_signer"] = signer
+            SESSION["_pending_password"] = password
+            SESSION["_pending_2fa_type"] = fa_type
+            SESSION["appleId"] = apple_id
+        return {"needs2fa": True, "type": fa_type}
+    team = _finalize_login(signer, apple_id)
+    return {"ok": True, "team": team}
+
+
+def auth_2fa(code):
+    with _lock:
+        signer = SESSION["_pending_signer"]
+        password = SESSION["_pending_password"]
+        apple_id = SESSION["appleId"]
+        fa_type = SESSION["_pending_2fa_type"]
+    if not signer:
+        return {"error": "no pending login"}
+    ok = (signer.auth.submit_2fa_code(code) if fa_type == "trusted_device"
+          else signer.auth.submit_2fa_sms_code(code))
+    if not ok:
+        return {"error": "invalid 2FA code"}
+    # Re-auth after 2FA (Apple requires it), then finalize.
+    signer.auth.authenticate(apple_id, password)
+    team = _finalize_login(signer, apple_id)
+    return {"ok": True, "team": team}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Install pipeline (sign via signer, install via devicectl)
+# ──────────────────────────────────────────────────────────────────────────────
+def _set_job(job_id, **kw):
+    with _lock:
+        job = JOBS.setdefault(job_id, {"jobId": job_id, "logs": []})
+        job.update(kw)
+
+
+def _job_log(job_id, line):
+    with _lock:
+        JOBS.setdefault(job_id, {"jobId": job_id, "logs": []})["logs"].append(
+            {"line": line, "at": int(time.time() * 1000)}
+        )
+    log(f"job {job_id[:8]}: {line}")
+
+
+def _download(url, dest):
+    import requests
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+
+
+def run_install(job_id, device_id, ipa_url, ipa_path):
+    try:
+        signer = SESSION["signer"]
+        if not signer:
+            _set_job(job_id, state="failed", error="Not signed in to Apple ID.")
+            return
+
+        work = Path(tempfile.mkdtemp(prefix="botflow-install-"))
+        if ipa_url:
+            _set_job(job_id, state="running", message="Downloading build…")
+            _job_log(job_id, f"downloading {ipa_url}")
+            ipa_path = str(work / "app.ipa")
+            _download(ipa_url, ipa_path)
+        if not ipa_path or not Path(ipa_path).exists():
+            _set_job(job_id, state="failed", error="No IPA to install.")
+            return
+
+        _set_job(job_id, state="running", message="Signing for your device…")
+        _job_log(job_id, "signing (provision + re-sign) with Apple ID")
+        signed = str(work / "signed.ipa")
+        signer.sign_ipa(ipa_path, output_path=signed, udid=device_id)
+        _job_log(job_id, f"signed: {signed}")
+
+        _set_job(job_id, state="running", message="Installing on device…")
+        r = subprocess.run(
+            ["xcrun", "devicectl", "device", "install", "app",
+             "--device", device_id, signed],
+            capture_output=True, text=True, timeout=300,
+        )
+        _job_log(job_id, (r.stdout or "").strip()[-500:])
+        if r.returncode != 0:
+            _set_job(job_id, state="failed",
+                     error=f"devicectl install failed: {(r.stderr or r.stdout).strip()[-400:]}")
+            return
+
+        # Try to launch; first launch needs the user to Trust the dev cert.
+        bundle_id = _bundle_id_of(signed)
+        launched = False
+        if bundle_id:
+            lr = subprocess.run(
+                ["xcrun", "devicectl", "device", "process", "launch",
+                 "--device", device_id, bundle_id],
+                capture_output=True, text=True, timeout=60,
+            )
+            launched = lr.returncode == 0 and "RequestDenied" not in (lr.stderr or "")
+            if not launched and ("not been explicitly trusted" in (lr.stderr or "") or "RequestDenied" in (lr.stderr or "")):
+                _set_job(
+                    job_id, state="succeeded",
+                    message="Installed. Trust the developer on your iPhone to launch: "
+                            "Settings → General → VPN & Device Management.",
+                    needsTrust=True,
+                )
+                return
+        _set_job(job_id, state="succeeded",
+                 message="Installed" + (" and launched." if launched else "."))
+    except Exception as e:
+        traceback.print_exc()
+        _set_job(job_id, state="failed", error=str(e))
+
+
+def _bundle_id_of(ipa_path):
+    try:
+        signer = SESSION["signer"]
+        return signer._get_bundle_id_from_ipa(ipa_path)
+    except Exception:
+        return None
+
+
+def start_install(device_id, ipa_url, ipa_path):
+    job_id = str(uuid.uuid4())
+    _set_job(job_id, state="queued", message="Queued")
+    threading.Thread(
+        target=run_install, args=(job_id, device_id, ipa_url, ipa_path), daemon=True
+    ).start()
+    return job_id
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HTTP
+# ──────────────────────────────────────────────────────────────────────────────
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):  # quiet default logging
+        pass
+
+    def _cors(self):
+        origin = self.headers.get("Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "content-type, accept")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+
+    def _json(self, status, body):
+        payload = json.dumps(body).encode()
+        self.send_response(status)
+        self._cors()
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _body(self):
+        n = int(self.headers.get("content-length", 0) or 0)
+        if not n:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            return {}
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        p = urlparse(self.path).path
+        try:
+            if p == "/botflow/v1/health":
+                return self._json(200, {
+                    "ok": True, "app": APP_NAME, "source": "mac-engine",
+                    "xcode": xcode_present(),
+                    "loggedIn": SESSION["signer"] is not None,
+                    "appleId": SESSION["appleId"], "team": SESSION["team"],
+                })
+            if p == "/botflow/v1/devices":
+                return self._json(200, {"devices": list_devices()})
+            if p == "/botflow/v1/auth/status":
+                return self._json(200, {
+                    "loggedIn": SESSION["signer"] is not None,
+                    "appleId": SESSION["appleId"], "team": SESSION["team"],
+                    "pending2fa": SESSION["_pending_signer"] is not None,
+                })
+            m = p.rsplit("/", 1)
+            if len(m) == 2 and m[0] == "/botflow/v1/install":
+                job = JOBS.get(m[1])
+                return self._json(200, job) if job else self._json(404, {"error": "job not found"})
+            return self._json(404, {"error": "not found"})
+        except Exception as e:
+            traceback.print_exc()
+            return self._json(500, {"error": str(e)})
+
+    def do_POST(self):
+        p = urlparse(self.path).path
+        body = self._body()
+        try:
+            if p == "/botflow/v1/auth/login":
+                if not body.get("appleId") or not body.get("password"):
+                    return self._json(400, {"error": "appleId and password required"})
+                return self._json(200, auth_login(body["appleId"], body["password"]))
+            if p == "/botflow/v1/auth/2fa":
+                if not body.get("code"):
+                    return self._json(400, {"error": "code required"})
+                res = auth_2fa(str(body["code"]).strip())
+                return self._json(200 if res.get("ok") else 400, res)
+            if p == "/botflow/v1/auth/logout":
+                with _lock:
+                    for k in list(SESSION):
+                        SESSION[k] = None
+                return self._json(200, {"ok": True})
+            if p == "/botflow/v1/install":
+                if not body.get("deviceId"):
+                    return self._json(400, {"error": "deviceId required"})
+                if SESSION["signer"] is None:
+                    return self._json(401, {"error": "Sign in to your Apple ID in Botflow Companion first."})
+                job_id = start_install(body["deviceId"], body.get("ipaUrl"), body.get("ipaPath"))
+                return self._json(200, {"jobId": job_id, "state": "queued"})
+            return self._json(404, {"error": "not found"})
+        except Exception as e:
+            traceback.print_exc()
+            return self._json(500, {"error": str(e)})
+
+
+def main():
+    os.chdir(Path(__file__).parent / "signer")  # anisette_helper resolves relative
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    log(f"{APP_NAME} engine on http://{HOST}:{PORT}")
+    log("health/devices ready; auth+install live (sign-in required for install)")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

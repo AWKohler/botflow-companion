@@ -1,0 +1,20 @@
+# Python engine
+engine/.venv/
+__pycache__/
+*.pyc
+
+# Throwaway spike clone (third-party; signer is vendored into engine/signer/)
+spike/
+
+# macOS app build output + generated project
+macos/build/
+macos/*.xcodeproj/
+
+# Node MVP (superseded by the Python engine)
+node_modules/
+
+# Artifacts / secrets
+*.ipa
+*.p12
+*.mobileprovision
+.DS_Store
