@@ -37,6 +37,8 @@ struct CompanionView: View {
             Divider()
             deviceSection
             Divider()
+            activitySection
+            Divider()
             footer
         }
         .padding(14)
@@ -112,6 +114,38 @@ struct CompanionView: View {
             }
             Text("Start installs from Botflow → Run on iPhone.")
                 .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var activitySection: some View {
+        Text("Activity").font(.subheadline.bold())
+        if model.recentEvents.isEmpty {
+            Text("Install activity will appear here (and as notifications).")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(model.recentEvents.prefix(5)) { ev in
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle().fill(color(for: ev.kind)).frame(width: 6, height: 6).padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(ev.title).font(.caption.bold())
+                            Text(ev.message).font(.caption2).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+        }
+    }
+
+    private func color(for kind: String) -> Color {
+        switch kind {
+        case "success": return .green
+        case "error": return .red
+        case "warning": return .orange
+        case "progress": return .blue
+        default: return .secondary
         }
     }
 

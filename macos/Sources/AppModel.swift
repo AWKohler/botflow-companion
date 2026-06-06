@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -18,12 +19,18 @@ final class AppModel: ObservableObject {
     @Published var busy = false
     @Published var error: String?
 
+    // Activity feed (most recent first) + native notifications.
+    @Published var recentEvents: [EngineClient.Event] = []
+    private var lastEventSeq = 0
+    private var seededEvents = false
+
     private var timer: Timer?
 
     func start() {
         EngineProcess.shared.startIfNeeded()
-        // Poll health + devices on a light cadence.
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // Poll health + devices + events on a light cadence.
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
         Task { await refresh() }
@@ -38,9 +45,33 @@ final class AppModel: ObservableObject {
             team = h.team
             if let a = h.appleId { appleId = a }
             devices = (try? await EngineClient.devices()) ?? devices
+            await pollEvents()
         } catch {
             engineUp = false
         }
+    }
+
+    private func pollEvents() async {
+        guard let resp = try? await EngineClient.events(since: lastEventSeq) else { return }
+        lastEventSeq = resp.cursor
+        guard !resp.events.isEmpty else { return }
+        // On first poll, just seed the log — don't fire notifications for history.
+        let firstSync = !seededEvents
+        seededEvents = true
+        for ev in resp.events {
+            recentEvents.insert(ev, at: 0)
+            if !firstSync { notify(ev) }
+        }
+        if recentEvents.count > 50 { recentEvents.removeLast(recentEvents.count - 50) }
+    }
+
+    private func notify(_ ev: EngineClient.Event) {
+        let content = UNMutableNotificationContent()
+        content.title = ev.title
+        content.body = ev.message
+        if ev.kind == "success" || ev.kind == "error" { content.sound = .default }
+        let req = UNNotificationRequest(identifier: "bf-\(ev.seq)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req)
     }
 
     func signIn() async {

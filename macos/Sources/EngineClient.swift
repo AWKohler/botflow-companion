@@ -18,6 +18,15 @@ struct EngineClient {
         let type: String
     }
     struct DevicesResponse: Decodable { let devices: [Device] }
+    struct Event: Decodable, Identifiable, Hashable {
+        let seq: Int
+        let at: Double
+        let kind: String      // info | progress | success | warning | error
+        let title: String
+        let message: String
+        var id: Int { seq }
+    }
+    struct EventsResponse: Decodable { let events: [Event]; let cursor: Int }
     struct LoginResponse: Decodable {
         let ok: Bool?
         let needs2fa: Bool?
@@ -46,6 +55,9 @@ struct EngineClient {
     static func health() async throws -> Health { try await get("/botflow/v1/health", timeout: 3) }
     static func devices() async throws -> [Device] {
         (try await get("/botflow/v1/devices", timeout: 20) as DevicesResponse).devices
+    }
+    static func events(since: Int) async throws -> EventsResponse {
+        try await get("/botflow/v1/events?since=\(since)", timeout: 4)
     }
     static func login(appleId: String, password: String) async throws -> LoginResponse {
         try await post("/botflow/v1/auth/login", body: ["appleId": appleId, "password": password], timeout: 60)

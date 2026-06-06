@@ -35,7 +35,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 # Vendored signer (apple_account.py + native anisette helper live next to us).
 sys.path.insert(0, str(Path(__file__).parent / "signer"))
@@ -60,9 +60,28 @@ SESSION = {
 }
 JOBS = {}  # jobId -> { jobId, state, message, error, logs[] }
 
+# Lifecycle events the native app polls (GET /events) to raise macOS
+# notifications + show an activity log. kind ∈ info|progress|success|warning|error.
+EVENTS = []
+_event_seq = 0
+
 
 def log(*a):
     print(f"[companion {time.strftime('%H:%M:%S')}]", *a, flush=True)
+
+
+def emit_event(kind, title, message, job_id=None):
+    """Append a lifecycle event for the native app to surface."""
+    global _event_seq
+    with _lock:
+        _event_seq += 1
+        EVENTS.append({
+            "seq": _event_seq, "at": int(time.time() * 1000),
+            "kind": kind, "title": title, "message": message, "jobId": job_id,
+        })
+        if len(EVENTS) > 200:
+            del EVENTS[: len(EVENTS) - 200]
+    log(f"event[{kind}] {title}: {message}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -144,6 +163,7 @@ def _finalize_login(signer, apple_id):
         SESSION["_pending_password"] = None
         SESSION["_pending_2fa_type"] = None
     log(f"logged in as {apple_id} (team={team})")
+    emit_event("success", "Signed in to Apple", f"{apple_id}" + (f" · team {team}" if team else ""))
     return team
 
 
@@ -213,28 +233,34 @@ def _download(url, dest):
 
 def run_install(job_id, device_id, ipa_url, ipa_path):
     try:
+        emit_event("info", "Run on iPhone", "Starting install…", job_id)
         signer = SESSION["signer"]
         if not signer:
             _set_job(job_id, state="failed", error="Not signed in to Apple ID.")
+            emit_event("error", "Not signed in", "Sign in to Apple in Botflow Companion first.", job_id)
             return
 
         work = Path(tempfile.mkdtemp(prefix="botflow-install-"))
         if ipa_url:
             _set_job(job_id, state="running", message="Downloading build…")
             _job_log(job_id, f"downloading {ipa_url}")
+            emit_event("progress", "Downloading build", "Fetching the build from Botflow…", job_id)
             ipa_path = str(work / "app.ipa")
             _download(ipa_url, ipa_path)
         if not ipa_path or not Path(ipa_path).exists():
             _set_job(job_id, state="failed", error="No IPA to install.")
+            emit_event("error", "Install failed", "No build to install.", job_id)
             return
 
         _set_job(job_id, state="running", message="Signing for your device…")
         _job_log(job_id, "signing (provision + re-sign) with Apple ID")
+        emit_event("progress", "Signing build", "Signing the app for your iPhone…", job_id)
         signed = str(work / "signed.ipa")
         signer.sign_ipa(ipa_path, output_path=signed, udid=device_id)
         _job_log(job_id, f"signed: {signed}")
 
         _set_job(job_id, state="running", message="Installing on device…")
+        emit_event("progress", "Installing", "Installing on your iPhone…", job_id)
         r = subprocess.run(
             ["xcrun", "devicectl", "device", "install", "app",
              "--device", device_id, signed],
@@ -242,8 +268,9 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         )
         _job_log(job_id, (r.stdout or "").strip()[-500:])
         if r.returncode != 0:
-            _set_job(job_id, state="failed",
-                     error=f"devicectl install failed: {(r.stderr or r.stdout).strip()[-400:]}")
+            err = f"devicectl install failed: {(r.stderr or r.stdout).strip()[-400:]}"
+            _set_job(job_id, state="failed", error=err)
+            emit_event("error", "Install failed", err[-180:], job_id)
             return
 
         # Try to launch; first launch needs the user to Trust the dev cert.
@@ -263,12 +290,18 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
                             "Settings → General → VPN & Device Management.",
                     needsTrust=True,
                 )
+                emit_event("warning", "Installed — trust needed",
+                           "On your iPhone: Settings → General → VPN & Device Management → Trust, then open the app.",
+                           job_id)
                 return
         _set_job(job_id, state="succeeded",
                  message="Installed" + (" and launched." if launched else "."))
+        emit_event("success", "Installed on iPhone",
+                   "Your app is on your iPhone" + (" and launched." if launched else "."), job_id)
     except Exception as e:
         traceback.print_exc()
         _set_job(job_id, state="failed", error=str(e))
+        emit_event("error", "Install failed", str(e)[:180], job_id)
 
 
 def _bundle_id_of(ipa_path):
@@ -338,6 +371,12 @@ class Handler(BaseHTTPRequestHandler):
                 })
             if p == "/botflow/v1/devices":
                 return self._json(200, {"devices": list_devices()})
+            if p == "/botflow/v1/events":
+                since = int((parse_qs(urlparse(self.path).query).get("since", ["0"])[0]) or 0)
+                with _lock:
+                    evs = [e for e in EVENTS if e["seq"] > since]
+                    cursor = _event_seq
+                return self._json(200, {"events": evs, "cursor": cursor})
             if p == "/botflow/v1/auth/status":
                 return self._json(200, {
                     "loggedIn": SESSION["signer"] is not None,
