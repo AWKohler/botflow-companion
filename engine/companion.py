@@ -53,6 +53,7 @@ SESSION = {
     "signer": None,      # logged-in AppleSigner
     "appleId": None,
     "team": None,
+    "accountType": None,  # "free" | "paid" — drives the free-vs-paid guidance UI
     # transient, only during the 2FA window:
     "_pending_signer": None,
     "_pending_password": None,
@@ -119,11 +120,25 @@ def list_devices():
         t = _device_type(hp.get("platform"), hp.get("deviceType"))
         if t not in ("iphone", "ipad"):
             continue
+        # `devicectl` lists every PAIRED device forever, even ones unplugged for
+        # days — pairing persists. The live signal is connectionProperties
+        # .tunnelState ("connected"/"connecting" when actually reachable, else
+        # "disconnected"/"unavailable"). Only surface reachable devices so the
+        # dropdown doesn't show a phone that's been unplugged for hours.
+        if cp.get("tunnelState") not in ("connected", "connecting"):
+            continue
+        # developerModeStatus ∈ enabled | disabled | restricted | <unknown>.
+        # ddiServicesAvailable = the Developer Disk Image is mounted (needed to
+        # actually launch/debug). Both come straight from devicectl.
         devices.append({
             "id": udid,
             "name": dp.get("name") or "iPhone",
             "osVersion": dp.get("osVersionNumber") or "",
             "type": t,
+            "connected": True,
+            "developerMode": dp.get("developerModeStatus") or "unknown",
+            "ddiReady": bool(dp.get("ddiServicesAvailable")),
+            "transport": cp.get("transportType") or "",
         })
     return devices
 
@@ -137,32 +152,51 @@ def xcode_present():
 # Apple ID auth (drives the vendored AppleSigner; 2FA over two requests)
 # ──────────────────────────────────────────────────────────────────────────────
 def _extract_team(signer):
-    """Best-effort team label after login."""
+    """Best-effort (team name, account type) after login.
+
+    Apple's listTeams returns each team with a `type`: a FREE Apple ID has a
+    personal team of type "Free" (7-day signing, 3-app limit, no push/widgets/
+    etc.); a PAID membership is "Company" or "Individual". We use that to drive
+    the free-vs-paid guidance in the UI.
+    """
     try:
         signer.portal.select_team()
     except Exception:
         pass
-    for attr in ("team", "team_id", "selected_team"):
-        v = getattr(signer.portal, attr, None)
-        if isinstance(v, dict):
-            return v.get("name") or v.get("teamId")
-        if isinstance(v, str):
-            return v
-    return None
+    team_id = getattr(signer.portal, "team_id", None)
+    name, account_type = None, None
+    try:
+        teams = signer.portal.list_teams()
+        team = next((t for t in teams if t.get("teamId") == team_id), None)
+        if team is None and teams:
+            team = teams[0]
+        if team:
+            name = team.get("name") or team.get("teamId")
+            account_type = "free" if (team.get("type") or "").lower() == "free" else "paid"
+    except Exception:
+        # Fall back to whatever the portal exposes for a name.
+        for attr in ("team", "team_id", "selected_team"):
+            v = getattr(signer.portal, attr, None)
+            if isinstance(v, dict):
+                name = v.get("name") or v.get("teamId"); break
+            if isinstance(v, str):
+                name = v; break
+    return name, account_type
 
 
 def _finalize_login(signer, apple_id):
     signer.auth.get_xcode_token()
     signer.portal = apple_account.DeveloperPortal(signer.auth)
-    team = _extract_team(signer)
+    team, account_type = _extract_team(signer)
     with _lock:
         SESSION["signer"] = signer
         SESSION["appleId"] = apple_id
         SESSION["team"] = team
+        SESSION["accountType"] = account_type
         SESSION["_pending_signer"] = None
         SESSION["_pending_password"] = None
         SESSION["_pending_2fa_type"] = None
-    log(f"logged in as {apple_id} (team={team})")
+    log(f"logged in as {apple_id} (team={team}, account={account_type})")
     emit_event("success", "Signed in to Apple", f"{apple_id}" + (f" · team {team}" if team else ""))
     return team
 
@@ -368,6 +402,7 @@ class Handler(BaseHTTPRequestHandler):
                     "xcode": xcode_present(),
                     "loggedIn": SESSION["signer"] is not None,
                     "appleId": SESSION["appleId"], "team": SESSION["team"],
+                    "accountType": SESSION["accountType"],
                 })
             if p == "/botflow/v1/devices":
                 return self._json(200, {"devices": list_devices()})
@@ -381,6 +416,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {
                     "loggedIn": SESSION["signer"] is not None,
                     "appleId": SESSION["appleId"], "team": SESSION["team"],
+                    "accountType": SESSION["accountType"],
                     "pending2fa": SESSION["_pending_signer"] is not None,
                 })
             m = p.rsplit("/", 1)
