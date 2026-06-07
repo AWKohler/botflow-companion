@@ -18,3 +18,8 @@ node_modules/
 *.p12
 *.mobileprovision
 .DS_Store
+
+# Packaging / PyInstaller build artifacts
+engine/dist/
+engine/build/
+/dist/
