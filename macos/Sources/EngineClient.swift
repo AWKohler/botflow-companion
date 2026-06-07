@@ -10,12 +10,21 @@ struct EngineClient {
         let loggedIn: Bool
         let appleId: String?
         let team: String?
+        let accountType: String?   // "free" | "paid"
     }
     struct Device: Decodable, Identifiable, Hashable {
         let id: String
         let name: String
         let osVersion: String
         let type: String
+        // Enriched status (optional → backward-compatible with older engines).
+        let connected: Bool?
+        let developerMode: String?   // enabled | disabled | restricted | unknown
+        let ddiReady: Bool?
+        let transport: String?
+
+        var devModeEnabled: Bool { developerMode == "enabled" }
+        var devModeDisabled: Bool { developerMode == "disabled" }
     }
     struct DevicesResponse: Decodable { let devices: [Device] }
     struct Event: Decodable, Identifiable, Hashable {

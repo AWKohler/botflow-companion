@@ -9,6 +9,7 @@ final class AppModel: ObservableObject {
     @Published var loggedIn = false
     @Published var appleId: String = ""
     @Published var team: String?
+    @Published var accountType: String?   // "free" | "paid"
     @Published var devices: [EngineClient.Device] = []
 
     // Login form
@@ -43,6 +44,7 @@ final class AppModel: ObservableObject {
             xcodeOK = h.xcode
             loggedIn = h.loggedIn
             team = h.team
+            accountType = h.accountType
             if let a = h.appleId { appleId = a }
             devices = (try? await EngineClient.devices()) ?? devices
             await pollEvents()
