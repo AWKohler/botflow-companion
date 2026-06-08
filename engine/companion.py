@@ -121,11 +121,16 @@ def list_devices():
         if t not in ("iphone", "ipad"):
             continue
         # `devicectl` lists every PAIRED device forever, even ones unplugged for
-        # days — pairing persists. The live signal is connectionProperties
-        # .tunnelState ("connected"/"connecting" when actually reachable, else
-        # "disconnected"/"unavailable"). Only surface reachable devices so the
-        # dropdown doesn't show a phone that's been unplugged for hours.
-        if cp.get("tunnelState") not in ("connected", "connecting"):
+        # days — pairing persists. Determine "currently usable" from:
+        #   • transportType == "wired"  → physically plugged in over USB. Note
+        #     devicectl reports tunnelState "disconnected" for a wired device
+        #     until an operation opens a tunnel, so we must NOT gate on that.
+        #   • tunnelState connected/connecting → reachable (e.g. over the network).
+        # An unplugged, network-paired phone shows transportType "localNetwork"
+        # + tunnelState "disconnected" → excluded (the stale-device bug).
+        wired = cp.get("transportType") == "wired"
+        reachable = cp.get("tunnelState") in ("connected", "connecting")
+        if not (wired or reachable):
             continue
         # developerModeStatus ∈ enabled | disabled | restricted | <unknown>.
         # ddiServicesAvailable = the Developer Disk Image is mounted (needed to
