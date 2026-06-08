@@ -24,6 +24,7 @@ Endpoints:
   GET  /botflow/v1/install/:jobId
 """
 
+import base64
 import json
 import os
 import sys
@@ -44,6 +45,12 @@ import apple_account  # noqa: E402  (AppleSigner, DeveloperPortal, ...)
 HOST = "127.0.0.1"
 PORT = 17321
 APP_NAME = "Botflow Companion"
+
+# Persist the Apple auth session so the user doesn't have to re-sign-in on every
+# daemon/app restart. Tokens still expire on Apple's side; restore is best-effort
+# and falls back to a normal login if they're stale.
+_SESSION_PATH = (Path.home() / "Library" / "Application Support"
+                 / "BotflowCompanion" / "session.json")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Session + job state (in-memory; re-login on restart for now)
@@ -189,6 +196,53 @@ def _extract_team(signer):
     return name, account_type
 
 
+def _b64(b):
+    return base64.b64encode(b).decode() if isinstance(b, (bytes, bytearray)) else b
+
+
+def _save_session(signer, apple_id, team, account_type):
+    """Persist the auth tokens so we can restore the session after a restart."""
+    try:
+        a = signer.auth
+        _SESSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SESSION_PATH.write_text(json.dumps({
+            "appleId": apple_id, "team": team, "accountType": account_type,
+            "adsid": a.adsid, "idms_token": a.idms_token,
+            "session_key": _b64(a.session_key), "cookie": _b64(a.cookie),
+        }))
+        os.chmod(_SESSION_PATH, 0o600)
+    except Exception as e:
+        log(f"session save failed (non-fatal): {e}")
+
+
+def _restore_session():
+    """Best-effort: rebuild a logged-in signer from the saved tokens."""
+    if not _SESSION_PATH.exists():
+        return
+    try:
+        d = json.loads(_SESSION_PATH.read_text())
+        signer = apple_account.AppleSigner()
+        auth = signer.auth
+        auth.adsid = d.get("adsid")
+        auth.idms_token = d.get("idms_token")
+        sk = d.get("session_key"); ck = d.get("cookie")
+        auth.session_key = base64.b64decode(sk) if sk else None
+        auth.cookie = base64.b64decode(ck) if ck else None
+        if not (auth.adsid and auth.idms_token and auth.session_key and auth.cookie):
+            return
+        auth.get_xcode_token()  # validates the tokens are still good
+        signer.portal = apple_account.DeveloperPortal(auth)
+        team, account_type = _extract_team(signer)
+        with _lock:
+            SESSION["signer"] = signer
+            SESSION["appleId"] = d.get("appleId")
+            SESSION["team"] = team or d.get("team")
+            SESSION["accountType"] = account_type or d.get("accountType")
+        log(f"restored Apple session for {d.get('appleId')}")
+    except Exception as e:
+        log(f"session restore failed (will need re-login): {e}")
+
+
 def _finalize_login(signer, apple_id):
     signer.auth.get_xcode_token()
     signer.portal = apple_account.DeveloperPortal(signer.auth)
@@ -201,6 +255,7 @@ def _finalize_login(signer, apple_id):
         SESSION["_pending_signer"] = None
         SESSION["_pending_password"] = None
         SESSION["_pending_2fa_type"] = None
+    _save_session(signer, apple_id, team, account_type)
     log(f"logged in as {apple_id} (team={team}, account={account_type})")
     emit_event("success", "Signed in to Apple", f"{apple_id}" + (f" · team {team}" if team else ""))
     return team
@@ -450,6 +505,10 @@ class Handler(BaseHTTPRequestHandler):
                 with _lock:
                     for k in list(SESSION):
                         SESSION[k] = None
+                try:
+                    _SESSION_PATH.unlink(missing_ok=True)
+                except Exception:
+                    pass
                 return self._json(200, {"ok": True})
             if p == "/botflow/v1/install":
                 if not body.get("deviceId"):
@@ -471,6 +530,7 @@ def main():
     signer_dir = Path(__file__).parent / "signer"
     if signer_dir.is_dir():
         os.chdir(signer_dir)
+    _restore_session()  # bring back a prior login if the tokens are still valid
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log(f"{APP_NAME} engine on http://{HOST}:{PORT}")
     log("health/devices ready; auth+install live (sign-in required for install)")

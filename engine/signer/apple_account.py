@@ -997,41 +997,51 @@ class DeveloperPortal:
                 raise
 
     def add_app_id(self, bundle_id: str, name: str) -> tuple:
-        """Register a new App ID. Returns (app_id_dict, actual_bundle_id)."""
-        print(f"[*] Creating App ID: {bundle_id}")
-        try:
-            r = self._request("addAppId.action", {
-                "teamId": self.team_id,
-                "identifier": bundle_id,
-                "name": name,
-            })
-            print(f"[+] App ID created: {bundle_id}")
-            return r.get("appId", {}), bundle_id
-        except Exception as e:
-            err = str(e)
-            # Already registered in THIS team
-            if "already exists" in err.lower():
-                print(f"[*] App ID already exists, reusing")
-                return self.find_app_id(bundle_id), bundle_id
-            # Bundle ID taken by ANOTHER team (9401) — prefix with team ID
-            if "(9401)" in err or "is not available" in err.lower():
-                alt_bundle = f"{self.team_id}.{bundle_id}"
-                print(f"[!] Bundle ID '{bundle_id}' is taken by another developer")
-                print(f"[*] Trying team-prefixed bundle ID: {alt_bundle}")
-                try:
-                    r2 = self._request("addAppId.action", {
-                        "teamId": self.team_id,
-                        "identifier": alt_bundle,
-                        "name": name,
-                    })
-                    print(f"[+] App ID created: {alt_bundle}")
-                    return r2.get("appId", {}), alt_bundle
-                except Exception as e2:
-                    if "already exists" in str(e2).lower() or "is not available" in str(e2).lower():
-                        print(f"[*] Alternative App ID already exists, reusing")
-                        return self.find_app_id(alt_bundle), alt_bundle
-                    raise
-            raise
+        """Register (or reuse) an App ID. Returns (app_id_dict, actual_bundle_id).
+
+        Apple bundle identifiers are GLOBALLY unique. A shared default like
+        `com.botflow.myapp` is almost always already registered by someone else
+        → 9401 "not available". And Apple reserves team-id-PREFIXED identifiers
+        (`TEAMID.com...`) → also 9401. So we make it unique to THIS team by
+        SUFFIXING the team id, which is globally unique and a valid identifier.
+        Re-running install reuses the same id (idempotent).
+        """
+        # Candidates in priority order: the requested id, then a team-unique one.
+        candidates = [bundle_id]
+        if self.team_id:
+            candidates.append(f"{bundle_id}.{self.team_id.lower()}")
+
+        last_err = None
+        for ident in candidates:
+            print(f"[*] Creating App ID: {ident}")
+            try:
+                r = self._request("addAppId.action", {
+                    "teamId": self.team_id, "identifier": ident, "name": name,
+                })
+                app_id = r.get("appId", {})
+                if app_id.get("appIdId"):
+                    print(f"[+] App ID created: {ident}")
+                    return app_id, ident
+                found = self.find_app_id(ident)
+                if found.get("appIdId"):
+                    return found, ident
+            except Exception as e:
+                last_err = e
+                msg = str(e).lower()
+                # Registered in THIS team already → reuse it.
+                if "already exists" in msg:
+                    found = self.find_app_id(ident)
+                    if found.get("appIdId"):
+                        print(f"[*] App ID already exists, reusing: {ident}")
+                        return found, ident
+                # "is not available" (9401, taken by another team) → next candidate.
+                print(f"[!] App ID '{ident}' unavailable — trying next option")
+
+        # Last resort: maybe a previous run already created one of our candidates.
+        for existing in self.list_app_ids():
+            if existing.get("identifier") in candidates and existing.get("appIdId"):
+                return existing, existing["identifier"]
+        raise Exception(f"Could not register an App ID for {bundle_id} ({last_err})")
 
     def list_app_ids(self) -> list:
         """List all App IDs."""
@@ -1174,16 +1184,26 @@ class AppleSigner:
         # Register device
         self.portal.register_device(app_name + " Device", udid)
 
-        # Revoke all existing dev certs — free accounts allow only 1 at a time
-        certs = self.portal.list_certificates()
-        if certs:
-            print(f"[!] Revoking {len(certs)} existing certificate(s) to free slot...")
-            for cert in sorted(certs, key=lambda c: c.get("dateCreated", "")):
-                self.portal.revoke_certificate(cert["serialNumber"])
-
-        # Generate key pair + CSR, get cert from response directly
+        # Generate key pair + CSR, then request a cert. We only revoke an
+        # existing cert if Apple says we're AT THE LIMIT (free accounts allow
+        # exactly 1 dev cert). On a paid account there's no 1-cert limit, so
+        # revoking unconditionally would needlessly nuke the user's Xcode cert
+        # on every install — avoid that by revoking only on the limit error.
         self._private_key, csr_pem = self.portal.generate_csr()
-        cert_info = self.portal.submit_csr(csr_pem)
+        try:
+            cert_info = self.portal.submit_csr(csr_pem)
+        except Exception as e:
+            msg = str(e).lower()
+            at_limit = ("maximum" in msg or "limit" in msg or "already have"
+                        in msg or "pending" in msg or "7460" in msg)
+            if not at_limit:
+                raise
+            certs = self.portal.list_certificates()
+            if certs:
+                print(f"[!] At certificate limit — revoking {len(certs)} cert(s) and retrying...")
+                for cert in sorted(certs, key=lambda c: c.get("dateCreated", "")):
+                    self.portal.revoke_certificate(cert["serialNumber"])
+            cert_info = self.portal.submit_csr(csr_pem)
 
         # Decode certContent — may be bytes (DER) or base64 string
         def _decode_cert(raw):
@@ -1237,12 +1257,9 @@ class AppleSigner:
                 cert_der = _decode_cert(certs[-1].get("certContent"))
                 print(f"[!] Using latest cert (no key match found)")
 
-        # Create App ID
+        # Create (or reuse) the App ID — add_app_id falls back to a team-unique
+        # identifier when the requested one is taken globally.
         app_id, actual_bundle_id = self.portal.add_app_id(bundle_id, app_name)
-        if not app_id:
-            app_id = self.portal.find_app_id(bundle_id)
-            actual_bundle_id = bundle_id
-
         app_id_id = app_id.get("appIdId")
         if not app_id_id:
             raise Exception(f"Could not find appIdId for {actual_bundle_id}")
