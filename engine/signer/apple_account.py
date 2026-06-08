@@ -160,8 +160,11 @@ class NativeAnisetteProvider(AnisetteProvider):
     Machine ID on every call. AKDevice provides real device identifiers.
     """
 
-    _HELPER_SRC = Path(__file__).parent / "anisette_helper.m"
-    _HELPER_BIN = Path(__file__).parent / "anisette_helper"
+    # When frozen by PyInstaller the bundled helper lives under sys._MEIPASS;
+    # from source it sits next to this file.
+    _BASE = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
+    _HELPER_SRC = _BASE / "anisette_helper.m"
+    _HELPER_BIN = _BASE / "anisette_helper"
 
     def __init__(self):
         self._ensure_built()

@@ -460,7 +460,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    os.chdir(Path(__file__).parent / "signer")  # anisette_helper resolves relative
+    # From source, run in signer/ (legacy relative-path assumptions). When frozen
+    # by PyInstaller there is no signer/ dir and the helper resolves via an
+    # absolute path (sys._MEIPASS), so skip the chdir.
+    signer_dir = Path(__file__).parent / "signer"
+    if signer_dir.is_dir():
+        os.chdir(signer_dir)
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log(f"{APP_NAME} engine on http://{HOST}:{PORT}")
     log("health/devices ready; auth+install live (sign-in required for install)")

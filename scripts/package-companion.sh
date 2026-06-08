@@ -37,7 +37,7 @@ PY="$ENGINE/.venv/bin/python"
   --name botflow-engine \
   --distpath "$ENGINE/dist" --workpath "$ENGINE/build" --specpath "$ENGINE/build" \
   --paths "$ENGINE/signer" \
-  --add-data "$ENGINE/signer/anisette_helper:signer" \
+  --add-binary "$ENGINE/signer/anisette_helper:." \
   --collect-all anisette --collect-all srp --collect-all lief --collect-all unicorn \
   --hidden-import apple_account \
   "$ENGINE/companion.py"
