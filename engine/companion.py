@@ -27,6 +27,7 @@ Endpoints:
 import base64
 import json
 import os
+import plistlib
 import sys
 import threading
 import traceback
@@ -325,6 +326,89 @@ def _download(url, dest):
                 f.write(chunk)
 
 
+def _installed_apps(device_id):
+    """Return [{bundleIdentifier, name}] for apps installed on the device."""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+            out = tf.name
+        subprocess.run(
+            ["xcrun", "devicectl", "device", "info", "apps",
+             "--device", device_id, "--json-output", out],
+            capture_output=True, text=True, timeout=60,
+        )
+        data = json.load(open(out))
+        os.unlink(out)
+        return data.get("result", {}).get("apps", []) or []
+    except Exception:
+        return []
+
+
+def _uninstall_app(device_id, bundle_id):
+    try:
+        r = subprocess.run(
+            ["xcrun", "devicectl", "device", "uninstall", "app",
+             "--device", device_id, bundle_id],
+            capture_output=True, text=True, timeout=60,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+# Apple's free-developer-profile install limit (max 3 sideloaded apps).
+_FREE_LIMIT_MARKERS = (
+    "maximum number of installed apps using a free developer profile",
+    "ApplicationVerificationFailed",
+)
+
+
+def _is_free_limit_error(text):
+    t = (text or "")
+    return any(m in t for m in _FREE_LIMIT_MARKERS)
+
+
+def _prune_botflow_apps(device_id, keep_bundle_id=None):
+    """Free up free-profile slots by removing OUR OWN stale dev installs only
+    (anything in the com.botflow.* namespace), never the user's other apps.
+    Returns the list of bundle ids removed."""
+    removed = []
+    for a in _installed_apps(device_id):
+        bid = a.get("bundleIdentifier", "") or ""
+        if bid == keep_bundle_id:
+            continue
+        if "com.botflow" in bid.lower():
+            if _uninstall_app(device_id, bid):
+                removed.append(bid)
+    return removed
+
+
+def _account_type_from_ipa(signed_ipa):
+    """Authoritative free-vs-paid: read the embedded profile from the freshly
+    signed IPA. Personal-team (free) profiles are `LocalProvision` and expire in
+    ~7 days; paid profiles last ~1 year. Returns "free" | "paid" | None."""
+    try:
+        import zipfile
+        with zipfile.ZipFile(signed_ipa, "r") as z:
+            name = next((n for n in z.namelist()
+                         if n.endswith(".app/embedded.mobileprovision")), None)
+            if not name:
+                return None
+            raw = z.read(name)
+        start = raw.index(b"<?xml")
+        end = raw.index(b"</plist>") + len(b"</plist>")
+        mp = plistlib.loads(raw[start:end])
+        if mp.get("LocalProvision"):
+            return "free"
+        created = mp.get("CreationDate")
+        expires = mp.get("ExpirationDate")
+        if created and expires:
+            days = (expires - created).days
+            return "free" if days <= 31 else "paid"
+    except Exception:
+        pass
+    return None
+
+
 def run_install(job_id, device_id, ipa_url, ipa_path):
     try:
         emit_event("info", "Run on iPhone", "Starting install…", job_id)
@@ -353,14 +437,51 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         signer.sign_ipa(ipa_path, output_path=signed, udid=device_id)
         _job_log(job_id, f"signed: {signed}")
 
+        # The embedded profile tells us authoritatively whether this is a free
+        # (personal-team, 7-day, 3-app-limit) or paid account — more reliable
+        # than listTeams. Correct the badge if it disagrees.
+        detected = _account_type_from_ipa(signed)
+        if detected and detected != SESSION.get("accountType"):
+            SESSION["accountType"] = detected
+            try:
+                _save_session(signer, SESSION.get("appleId"),
+                              SESSION.get("team"), detected)
+            except Exception:
+                pass
+            _job_log(job_id, f"account type detected from profile: {detected}")
+
+        bundle_id = _bundle_id_of(signed)
+
+        def _do_install():
+            return subprocess.run(
+                ["xcrun", "devicectl", "device", "install", "app",
+                 "--device", device_id, signed],
+                capture_output=True, text=True, timeout=300,
+            )
+
         _set_job(job_id, state="running", message="Installing on device…")
         emit_event("progress", "Installing", "Installing on your iPhone…", job_id)
-        r = subprocess.run(
-            ["xcrun", "devicectl", "device", "install", "app",
-             "--device", device_id, signed],
-            capture_output=True, text=True, timeout=300,
-        )
+        r = _do_install()
         _job_log(job_id, (r.stdout or "").strip()[-500:])
+
+        # Free accounts cap sideloaded apps at 3. If we hit that, clear our OWN
+        # stale com.botflow.* dev installs and retry once before giving up.
+        if r.returncode != 0 and _is_free_limit_error((r.stderr or "") + (r.stdout or "")):
+            emit_event("progress", "Freeing space",
+                       "Free Apple account allows 3 apps — removing old Botflow builds…", job_id)
+            removed = _prune_botflow_apps(device_id, keep_bundle_id=bundle_id)
+            if removed:
+                _job_log(job_id, f"pruned stale botflow apps: {removed}")
+                r = _do_install()
+                _job_log(job_id, (r.stdout or "").strip()[-500:])
+            if r.returncode != 0 and _is_free_limit_error((r.stderr or "") + (r.stdout or "")):
+                msg = ("Your iPhone has reached the free Apple account limit of 3 "
+                       "installed apps. Delete an app you installed via Botflow/Xcode "
+                       "from your Home Screen, then try again.")
+                _set_job(job_id, state="failed", error=msg, freeLimit=True)
+                emit_event("error", "iPhone app limit reached", msg, job_id)
+                return
+
         if r.returncode != 0:
             err = f"devicectl install failed: {(r.stderr or r.stdout).strip()[-400:]}"
             _set_job(job_id, state="failed", error=err)
@@ -368,7 +489,6 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
             return
 
         # Try to launch; first launch needs the user to Trust the dev cert.
-        bundle_id = _bundle_id_of(signed)
         launched = False
         if bundle_id:
             lr = subprocess.run(
