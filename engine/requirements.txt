@@ -15,3 +15,7 @@ Anisette>=1.2
 pystray>=0.19
 pywebview>=5.0
 pillow>=10.0
+# Developer Mode enable + (future) richer device ops; pure-Python over usbmux.
+pymobiledevice3>=4.0
+# pymobiledevice3 needs win32security on Windows.
+pywin32>=306; sys_platform == "win32"

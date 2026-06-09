@@ -267,27 +267,45 @@ def launch(udid, bundle_id, timeout=60):
 
 def enable_devmode(udid):
     """Trigger Developer Mode on the device. The user still confirms on-device +
-    reboots (Apple requirement). Returns (ok: bool, message: str)."""
+    reboots (Apple requirement). Returns (ok: bool, message: str).
+
+    Uses pymobiledevice3 (pure-Python, talks to usbmux/AMDS) — this is what makes
+    the Developer Mode toggle appear in Settings AND arms it. libimobiledevice's
+    older builds ship no devmode tool, so this is the cross-platform path.
+    """
+    if IS_MAC:
+        # On macOS the toggle is reached through Settings after a dev connection.
+        _run(["xcrun", "devicectl", "device", "info", "details", "--device", udid], timeout=30)
+        return (True, "On your iPhone: Settings → Privacy & Security → Developer Mode → On, then reboot.")
     try:
-        if IS_MAC:
-            # devicectl can arm developer mode; otherwise it's a Settings toggle.
-            r = _run(["xcrun", "devicectl", "device", "info", "details",
-                      "--device", udid], timeout=30)
-            return (r.returncode == 0,
-                    "On your iPhone: Settings → Privacy & Security → Developer Mode → On, then reboot.")
-        if IS_WIN:
-            tool = _tool("idevicedevmodectl")
-            if not tool:
-                return (False, "Developer Mode tool not available in this build.")
-            r = _run([tool, "enable", "-u", udid], timeout=30)
-            ok = r.returncode == 0 or "already" in ((r.stdout or "") + (r.stderr or "")).lower()
-            return (ok, "Confirm Developer Mode on your iPhone and reboot when prompted."
-                    if ok else (r.stderr or r.stdout or "Could not enable Developer Mode."))
-    except ToolMissing:
-        return (False, "Developer Mode tool not installed.")
+        from pymobiledevice3.lockdown import create_using_usbmux
+        from pymobiledevice3.services.amfi import AmfiService
+    except Exception:
+        return (False, "Developer Mode requires the pymobiledevice3 component (missing from this build).")
+    try:
+        lockdown = create_using_usbmux(serial=udid)
+        amfi = AmfiService(lockdown)
+        # Make the option visible in Settings first (fixes 'it never appears'),
+        # then arm it — the device reboots and the user confirms post-restart.
+        try:
+            amfi.reveal_developer_mode_option_in_ui()
+        except Exception:
+            pass
+        amfi.enable_developer_mode()
+        return (True, "Developer Mode requested — your device will restart. After it reboots, "
+                      "tap “Turn On” and enter your passcode.")
     except Exception as e:
-        return (False, str(e))
-    return (False, "Unsupported platform.")
+        msg = str(e)
+        if "already" in msg.lower() or "enabled" in msg.lower():
+            return (True, "Developer Mode is already being enabled — confirm on your device after it reboots.")
+        # Last resort: at least reveal the toggle so the user can flip it manually.
+        try:
+            lockdown = create_using_usbmux(serial=udid)
+            AmfiService(lockdown).reveal_developer_mode_option_in_ui()
+            return (True, "Opened Developer Mode in Settings → Privacy & Security on your device. "
+                          "Turn it on there, then reboot.")
+        except Exception:
+            return (False, msg or "Could not enable Developer Mode.")
 
 
 def installed_apps(udid):
