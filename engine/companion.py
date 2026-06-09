@@ -128,17 +128,19 @@ def list_devices():
         t = _device_type(hp.get("platform"), hp.get("deviceType"))
         if t not in ("iphone", "ipad"):
             continue
-        # `devicectl` lists every PAIRED device forever, even ones unplugged for
-        # days — pairing persists. Determine "currently usable" from:
-        #   • transportType == "wired"  → physically plugged in over USB. Note
-        #     devicectl reports tunnelState "disconnected" for a wired device
-        #     until an operation opens a tunnel, so we must NOT gate on that.
-        #   • tunnelState connected/connecting → reachable (e.g. over the network).
-        # An unplugged, network-paired phone shows transportType "localNetwork"
-        # + tunnelState "disconnected" → excluded (the stale-device bug).
-        wired = cp.get("transportType") == "wired"
-        reachable = cp.get("tunnelState") in ("connected", "connecting")
-        if not (wired or reachable):
+        # `devicectl` lists every PAIRED device forever, but only assigns a
+        # transportType to devices it can currently reach:
+        #   • "wired"        → plugged in over USB right now.
+        #   • "localNetwork" → reachable wirelessly (Xcode "Connect via network")
+        #                      — this is the OTA case; keep it so the user can
+        #                      sideload without a cable.
+        # devicectl reports tunnelState "disconnected" for BOTH until an op opens
+        # a tunnel, so we must NOT gate on tunnelState. A device that is neither
+        # wired nor on the local network has no transportType (or an empty one)
+        # and is genuinely offline → skip it.
+        transport = cp.get("transportType")
+        reachable = (cp.get("tunnelState") in ("connected", "connecting"))
+        if transport not in ("wired", "localNetwork") and not reachable:
             continue
         # developerModeStatus ∈ enabled | disabled | restricted | <unknown>.
         # ddiServicesAvailable = the Developer Disk Image is mounted (needed to
@@ -164,6 +166,30 @@ def xcode_present():
 # ──────────────────────────────────────────────────────────────────────────────
 # Apple ID auth (drives the vendored AppleSigner; 2FA over two requests)
 # ──────────────────────────────────────────────────────────────────────────────
+def _is_free_team(team):
+    """Free (Xcode personal-team) vs paid Developer Program.
+
+    The team `type` is "Individual" for BOTH a free personal team and a paid
+    individual membership, so it can't distinguish them. The reliable markers
+    are the membership product and the member role:
+      • a free team's membership is the "Xcode Free Provisioning Program"
+        (membershipProductId == "fp22"),
+      • and currentTeamMember.roles contains "XCODE_FREE_USER".
+    A paid membership has a different product id and admin/agent roles.
+    """
+    roles = ((team.get("currentTeamMember") or {}).get("roles")) or []
+    if any("FREE" in str(r).upper() for r in roles):
+        return True
+    for m in (team.get("memberships") or []):
+        pid = (m.get("membershipProductId") or "").lower()
+        nm = (m.get("name") or "").lower()
+        if pid == "fp22" or "free provisioning" in nm:
+            return True
+    # If there's an explicit non-free membership, treat as paid; otherwise,
+    # absent any membership info, default to free (safer — assumes limits apply).
+    return not (team.get("memberships"))
+
+
 def _extract_team(signer):
     """Best-effort (team name, account type) after login.
 
@@ -185,7 +211,7 @@ def _extract_team(signer):
             team = teams[0]
         if team:
             name = team.get("name") or team.get("teamId")
-            account_type = "free" if (team.get("type") or "").lower() == "free" else "paid"
+            account_type = "free" if _is_free_team(team) else "paid"
     except Exception:
         # Fall back to whatever the portal exposes for a name.
         for attr in ("team", "team_id", "selected_team"):
@@ -239,7 +265,14 @@ def _restore_session():
             SESSION["appleId"] = d.get("appleId")
             SESSION["team"] = team or d.get("team")
             SESSION["accountType"] = account_type or d.get("accountType")
-        log(f"restored Apple session for {d.get('appleId')}")
+        # Heal a stale/incorrect accountType saved by an older build.
+        if account_type and account_type != d.get("accountType"):
+            try:
+                _save_session(signer, d.get("appleId"),
+                              SESSION["team"], account_type)
+            except Exception:
+                pass
+        log(f"restored Apple session for {d.get('appleId')} (account={SESSION['accountType']})")
     except Exception as e:
         log(f"session restore failed (will need re-login): {e}")
 

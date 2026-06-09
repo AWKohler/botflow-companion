@@ -259,6 +259,7 @@ struct DeviceCard: View {
             if device.devModeEnabled {
                 Text("Start installs from Botflow → Run on iPhone.")
                     .font(.caption2).foregroundStyle(.secondary)
+                wirelessHint
             } else if device.devModeDisabled {
                 devModeGuide
             }
@@ -266,6 +267,19 @@ struct DeviceCard: View {
         .padding(10)
         .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.12), lineWidth: 1))
+    }
+
+    @ViewBuilder private var wirelessHint: some View {
+        if device.transport == "localNetwork" {
+            Label("Connected wirelessly — you can install without a cable.",
+                  systemImage: "wifi")
+                .font(.caption2).foregroundStyle(.green)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text("Want to install without a cable? In Xcode, open Window → Devices and Simulators, select this iPhone, and check “Connect via network” (one-time, while plugged in).")
+                .font(.caption2).foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var transportSuffix: String {
