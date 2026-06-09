@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from pathlib import Path
 
 HEALTH = "http://127.0.0.1:17321/botflow/v1/health"
 UI_URL = "http://127.0.0.1:17321/"
@@ -83,12 +84,21 @@ def run_window():
 
 # ── TRAY mode ────────────────────────────────────────────────────────────────
 def _tray_icon_image():
-    from PIL import Image, ImageDraw
+    from PIL import Image
+    # Brand icon (bundled next to the app / in _MEIPASS when frozen).
+    base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
+    for cand in (base / "assets" / "tray.png", base / "tray.png"):
+        if cand.exists():
+            try:
+                return Image.open(str(cand)).convert("RGBA")
+            except Exception:
+                pass
+    # Fallback: simple generated mark.
+    from PIL import ImageDraw
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([6, 6, 58, 58], radius=14, fill=(30, 36, 64, 255),
-                        outline=(108, 140, 255, 255), width=3)
-    d.rounded_rectangle([24, 16, 40, 48], radius=4, outline=(238, 240, 245, 255), width=3)
+    ImageDraw.Draw(img).rounded_rectangle([6, 6, 58, 58], radius=14,
+                                          fill=(255, 255, 255, 255),
+                                          outline=(140, 82, 255, 255), width=3)
     return img
 
 

@@ -78,15 +78,15 @@ def _find_zsign():
     candidates = []
     if env:
         candidates.append(Path(env))
+    # Bundled with a frozen build (tools next to _MEIPASS / the package) — this is
+    # what the shipped app uses; checked first so it wins over any dev install.
+    base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
+    candidates += [base / "tools" / exe, base.parent / "tools" / exe]
     if platform.system() == "Windows":
         candidates += [
-            # Built here, then copied next to its mingw64 DLLs so they resolve.
-            Path(r"C:\msys64\mingw64\bin") / exe,
+            Path(r"C:\msys64\mingw64\bin") / exe,  # dev machine fallback
             Path.home() / "zsign" / exe,
         ]
-    # Bundled with a frozen build (engine/tools or _MEIPASS/tools).
-    base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
-    candidates.append(base / "tools" / exe)
     for c in candidates:
         if c.exists():
             return str(c)
