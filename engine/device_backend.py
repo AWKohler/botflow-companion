@@ -68,12 +68,18 @@ def _tool(name):
     return shutil.which(name) or shutil.which(exe)
 
 
+# Suppress the console window each child process would otherwise flash on
+# Windows (the engine runs windowless under pythonw / the tray app).
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _run(cmd, timeout=120):
     # Force UTF-8 decoding: libimobiledevice emits UTF-8, but Windows' default
     # locale (cp1252) would mangle non-ASCII device names (e.g. the ’ in a name).
     try:
         return subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout,
+                              creationflags=_NO_WINDOW)
     except FileNotFoundError as e:
         raise ToolMissing(cmd[0]) from e
 

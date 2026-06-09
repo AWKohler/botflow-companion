@@ -1661,7 +1661,9 @@ class AppleSigner:
                     ipa_path,
                 ]
                 print(f"[*] Signing: {' '.join(cmd)}")
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 if result.returncode == 0:
                     print(f"[+] Signed IPA: {output_path}")
                     return output_path

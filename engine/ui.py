@@ -15,10 +15,18 @@ _HTML = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Botflow Companion</title>
 <style>
+  /* Botflow sand palette (mirrors the web app's globals.css tokens). */
   :root{
-    --bg:#0e0f13; --surface:#16181f; --elevated:#1d2029; --border:#2a2e3a;
-    --fg:#eef0f5; --muted:#9aa1b2; --accent:#6c8cff; --accent-fg:#fff;
-    --green:#3ecf8e; --orange:#e7a13d; --red:#ef6a6a;
+    --bg:#fefefe; --surface:#fcfbf8; --elevated:#f8f4ed; --soft:#e7dfd2;
+    --border:#eceae4; --fg:#2f2f31; --muted:#3f3f46; --accent:#1d52f1;
+    --accent-fg:#ffffff; --green:#1f8f5f; --orange:#b06f17; --red:#c2402f;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#1d1a16; --surface:#23201b; --elevated:#2b2722; --soft:#2a251f;
+      --border:#3a342e; --fg:#ede6db; --muted:#b8ada1; --accent:#d8826a;
+      --accent-fg:#1b1713; --green:#5fcf97; --orange:#e7a13d; --red:#ef8a78;
+    }
   }
   *{box-sizing:border-box}
   html,body{margin:0;height:100%}
@@ -29,15 +37,14 @@ _HTML = r"""<!DOCTYPE html>
   }
   .wrap{max-width:520px;margin:0 auto;padding:18px 18px 26px}
   header{display:flex;align-items:center;gap:11px;margin-bottom:6px}
-  .logo{width:34px;height:34px;border-radius:9px;background:
-    linear-gradient(145deg,#2b3350,#11131b);display:grid;place-items:center;
-    border:1px solid var(--border);font-size:18px}
+  .logo{width:34px;height:34px;border-radius:9px;background:var(--elevated);
+    display:grid;place-items:center;border:1px solid var(--soft);font-size:18px}
   h1{font-size:15px;margin:0;font-weight:650;letter-spacing:.2px}
   .sub{color:var(--muted);font-size:12px;margin-top:1px}
   .badge{margin-left:auto;font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px;
     border:1px solid var(--border);color:var(--muted)}
-  .badge.free{color:var(--orange);border-color:#4a3a1e;background:#231b0f}
-  .badge.paid{color:var(--green);border-color:#1e4a35;background:#0f231a}
+  .badge.free{color:var(--orange);border-color:color-mix(in srgb,var(--orange) 35%,transparent);background:color-mix(in srgb,var(--orange) 12%,transparent)}
+  .badge.paid{color:var(--green);border-color:color-mix(in srgb,var(--green) 35%,transparent);background:color-mix(in srgb,var(--green) 12%,transparent)}
   .card{background:var(--surface);border:1px solid var(--border);border-radius:13px;
     padding:14px;margin-top:13px}
   .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);
@@ -60,9 +67,9 @@ _HTML = r"""<!DOCTYPE html>
   .dev .nm{font-weight:600}
   .dev .meta{color:var(--muted);font-size:12px}
   .pill{margin-left:auto;font-size:11px;font-weight:600;padding:3px 9px;border-radius:999px}
-  .pill.ok{color:var(--green);background:#0f231a}
-  .pill.warn{color:var(--orange);background:#231b0f}
-  .pill.off{color:var(--muted);background:var(--bg)}
+  .pill.ok{color:var(--green);background:color-mix(in srgb,var(--green) 14%,transparent)}
+  .pill.warn{color:var(--orange);background:color-mix(in srgb,var(--orange) 14%,transparent)}
+  .pill.off{color:var(--muted);background:var(--soft)}
   .muted{color:var(--muted)}
   .err{color:var(--red);font-size:12.5px;margin-top:9px;min-height:1px}
   .hint{color:var(--muted);font-size:12px;margin-top:8px}
