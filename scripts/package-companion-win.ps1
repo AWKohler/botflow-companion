@@ -38,13 +38,10 @@ Write-Host "==> 2/4  freeze app (PyInstaller --onedir, windowed, tray)"
   --collect-all lief `
   --collect-all unicorn `
   --collect-all pystray `
-  --collect-all webview `
-  --collect-all pythonnet `
   --hidden-import apple_account `
   --hidden-import device_backend `
   --hidden-import ui `
   --hidden-import companion `
-  --hidden-import clr `
   app.py
 $appdir = Join-Path $engine "dist\BotflowCompanion"
 if (-not (Test-Path (Join-Path $appdir "BotflowCompanion.exe"))) { throw "freeze failed" }

@@ -73,13 +73,13 @@ def run_engine():
 
 # ── WINDOW mode ──────────────────────────────────────────────────────────────
 def run_window():
-    import webview
-    _wait_engine(25)  # don't show a blank window before the engine answers
-    webview.create_window(
-        "Botflow Companion", UI_URL,
-        width=560, height=760, min_size=(460, 560),
-    )
-    webview.start()
+    # The companion UI is served by the engine; we render it in the user's
+    # default browser. (We previously embedded pywebview, but its WebView2/
+    # pythonnet backend fast-fails when frozen with PyInstaller — opening the
+    # browser is robust, dependency-free, and shows the same branded page.)
+    import webbrowser
+    _wait_engine(25)
+    webbrowser.open(UI_URL)
 
 
 # ── TRAY mode ────────────────────────────────────────────────────────────────
@@ -139,10 +139,10 @@ def run_tray():
         )
 
     def open_window(icon=None, item=None):
+        import webbrowser
         ensure_engine()
-        flags = 0x08000000 if os.name == "nt" else 0
-        subprocess.Popen(_self_cmd("--window"),
-                         creationflags=flags if os.name == "nt" else 0)
+        _wait_engine(25)
+        webbrowser.open(UI_URL)
 
     def quit_app(icon, item):
         try:
@@ -173,17 +173,42 @@ def run_tray():
     icon.run()
 
 
+def _crash(mode, exc):
+    """Write a startup crash traceback to a file (frozen --windowed swallows
+    stderr, so this is how we see why a mode failed)."""
+    import traceback
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "BotflowCompanion", "logs")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "crash.log"), "a", encoding="utf-8") as f:
+            f.write(f"=== crash in mode {mode} ===\n{traceback.format_exc()}\n")
+    except Exception:
+        pass
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--tray"
-    if mode == "--engine":
-        _setup_logging("engine")
-        run_engine()
-    elif mode == "--window":
-        _setup_logging("window")
-        run_window()
-    else:
-        _setup_logging("tray")
-        run_tray()
+    name = {"--engine": "engine", "--window": "window"}.get(mode, "tray")
+    _setup_logging(name)
+    if mode == "--enginedbg":
+        # Diagnostic: engine WITHOUT the log redirect, so a --console build
+        # prints everything (incl. the last line before a native crash).
+        print("DBG: importing companion...", flush=True)
+        import companion
+        print("DBG: companion imported; calling main()", flush=True)
+        companion.main()
+        return
+    try:
+        if mode == "--engine":
+            run_engine()
+        elif mode == "--window":
+            run_window()
+        else:
+            run_tray()
+    except Exception as e:
+        _crash(mode, e)
+        raise
 
 
 if __name__ == "__main__":

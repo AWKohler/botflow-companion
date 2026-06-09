@@ -11,9 +11,10 @@ srp>=1.0.21
 unicorn>=2.1
 lief>=0.16
 Anisette>=1.2
-# Windows tray app UI (app.py). pywebview uses the built-in Edge WebView2.
+# Windows tray app (app.py). The UI is the engine-served HTML opened in the
+# default browser — no embedded webview (pywebview/pythonnet fast-fails when
+# frozen with PyInstaller).
 pystray>=0.19
-pywebview>=5.0
 pillow>=10.0
 # Developer Mode enable + (future) richer device ops; pure-Python over usbmux.
 pymobiledevice3>=4.0

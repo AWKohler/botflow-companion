@@ -29,21 +29,21 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Files]
-Source: "..\engine\dist\BotflowCompanion\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; Portable Python runtime + app source + bundled tools (no PyInstaller freeze).
+Source: "..\portable\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "..\portable\app\*"; DestDir: "{app}\app"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "BotflowCompanion.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Bundled 7-Zip (extract the AMDS MSI out of Apple's installer). dontcopy = staged to {tmp} on demand.
 Source: "7z.exe"; Flags: dontcopy
 Source: "7z.dll"; Flags: dontcopy
 
 [Icons]
-Name: "{group}\Botflow Companion"; Filename: "{app}\{#MyAppExeName}"
-Name: "{userstartup}\Botflow Companion"; Filename: "{app}\{#MyAppExeName}"
+; The tray app = runtime\pythonw.exe running app\app.py, with the brand icon.
+Name: "{group}\Botflow Companion"; Filename: "{app}\runtime\pythonw.exe"; Parameters: "app.py"; WorkingDir: "{app}\app"; IconFilename: "{app}\BotflowCompanion.ico"
+Name: "{userstartup}\Botflow Companion"; Filename: "{app}\runtime\pythonw.exe"; Parameters: "app.py"; WorkingDir: "{app}\app"; IconFilename: "{app}\BotflowCompanion.ico"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Botflow Companion now"; Flags: nowait postinstall skipifsilent
-
-[UninstallRun]
-; Stop the running app on uninstall.
-Filename: "{cmd}"; Parameters: "/c taskkill /F /IM {#MyAppExeName} /T"; Flags: runhidden; RunOnceId: "killcompanion"
+Filename: "{app}\runtime\pythonw.exe"; Parameters: "app.py"; WorkingDir: "{app}\app"; Description: "Launch Botflow Companion now"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var
