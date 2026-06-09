@@ -74,9 +74,29 @@ def _tray_icon_image():
     return img
 
 
+def _single_instance_or_exit():
+    """Ensure only ONE tray runs (else multiple supervisors churn engines).
+    Uses a Windows named mutex; on other OSes a localhost lock socket."""
+    if os.name == "nt":
+        import ctypes
+        mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "BotflowCompanionTray")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            sys.exit(0)
+        return mutex  # keep handle alive for process lifetime
+    else:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", 17320))  # adjacent to the engine port
+        except OSError:
+            sys.exit(0)
+        return s
+
+
 def run_tray():
     import pystray
 
+    _lock = _single_instance_or_exit()  # noqa: F841 (held for process lifetime)
     engine_proc = {"p": None}
 
     def ensure_engine():
