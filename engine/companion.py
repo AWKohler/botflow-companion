@@ -44,6 +44,7 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, str(Path(__file__).parent / "signer"))
 import apple_account  # noqa: E402  (AppleSigner, DeveloperPortal, ...)
 import device_backend as dev  # noqa: E402  (cross-platform device ops)
+import ui  # noqa: E402  (the companion window HTML)
 
 HOST = "127.0.0.1"
 PORT = 17321
@@ -530,9 +531,21 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
+    def _html(self, body):
+        payload = body.encode("utf-8")
+        self.send_response(200)
+        self._cors()
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self):
         p = urlparse(self.path).path
         try:
+            # The companion window UI (rendered by pywebview; also usable in a browser).
+            if p == "/" or p == "/ui":
+                return self._html(ui.get_html())
             if p == "/botflow/v1/health":
                 rd = dev.readiness()
                 return self._json(200, {
@@ -595,6 +608,11 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
                 return self._json(200, {"ok": True})
+            if p == "/botflow/v1/devmode/enable":
+                if not body.get("deviceId"):
+                    return self._json(400, {"error": "deviceId required"})
+                ok, msg = dev.enable_devmode(body["deviceId"])
+                return self._json(200 if ok else 500, {"ok": ok, "message": msg, "error": None if ok else msg})
             if p == "/botflow/v1/install":
                 if not body.get("deviceId"):
                     return self._json(400, {"error": "deviceId required"})

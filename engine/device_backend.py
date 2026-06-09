@@ -259,6 +259,31 @@ def launch(udid, bundle_id, timeout=60):
     raise ToolMissing("device-backend")
 
 
+def enable_devmode(udid):
+    """Trigger Developer Mode on the device. The user still confirms on-device +
+    reboots (Apple requirement). Returns (ok: bool, message: str)."""
+    try:
+        if IS_MAC:
+            # devicectl can arm developer mode; otherwise it's a Settings toggle.
+            r = _run(["xcrun", "devicectl", "device", "info", "details",
+                      "--device", udid], timeout=30)
+            return (r.returncode == 0,
+                    "On your iPhone: Settings → Privacy & Security → Developer Mode → On, then reboot.")
+        if IS_WIN:
+            tool = _tool("idevicedevmodectl")
+            if not tool:
+                return (False, "Developer Mode tool not available in this build.")
+            r = _run([tool, "enable", "-u", udid], timeout=30)
+            ok = r.returncode == 0 or "already" in ((r.stdout or "") + (r.stderr or "")).lower()
+            return (ok, "Confirm Developer Mode on your iPhone and reboot when prompted."
+                    if ok else (r.stderr or r.stdout or "Could not enable Developer Mode."))
+    except ToolMissing:
+        return (False, "Developer Mode tool not installed.")
+    except Exception as e:
+        return (False, str(e))
+    return (False, "Unsupported platform.")
+
+
 def installed_apps(udid):
     """Return [{bundleIdentifier, name}] for user apps. [] if unavailable."""
     try:

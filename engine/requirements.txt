@@ -11,3 +11,7 @@ srp>=1.0.21
 unicorn>=2.1
 lief>=0.16
 Anisette>=1.2
+# Windows tray app UI (app.py). pywebview uses the built-in Edge WebView2.
+pystray>=0.19
+pywebview>=5.0
+pillow>=10.0
