@@ -32,23 +32,48 @@ IS_LINUX = platform.system() == "Linux"
 _BUNDLE = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
 _TOOLS = _BUNDLE / "tools"
 
+# Extra directories to search for libimobiledevice on Windows when the tools
+# aren't bundled. Running them from their install dir lets Windows load their
+# co-located DLLs without polluting PATH. Override with BOTFLOW_IMOBILE_DIR.
+_WIN_TOOL_DIRS = []
+if IS_WIN:
+    _env_dir = os.environ.get("BOTFLOW_IMOBILE_DIR")
+    if _env_dir:
+        _WIN_TOOL_DIRS.append(Path(_env_dir))
+    _WIN_TOOL_DIRS += [
+        Path(r"C:\msys64\mingw64\bin"),
+        Path(r"C:\msys64\ucrt64\bin"),
+        Path(r"C:\Program Files\libimobiledevice"),
+        Path(r"C:\libimobiledevice"),
+    ]
+
 
 class ToolMissing(Exception):
     """A required CLI (devicectl / libimobiledevice) isn't installed."""
 
 
 def _tool(name):
-    """Resolve a CLI: bundled tools dir first, then PATH. Returns path or None."""
+    """Resolve a CLI: bundled tools dir, then known install dirs, then PATH.
+
+    Returns the full path (so the OS loads the tool's co-located DLLs) or None.
+    """
     exe = name + (".exe" if IS_WIN else "")
     cand = _TOOLS / exe
     if cand.exists():
         return str(cand)
+    for d in _WIN_TOOL_DIRS:
+        c = d / exe
+        if c.exists():
+            return str(c)
     return shutil.which(name) or shutil.which(exe)
 
 
 def _run(cmd, timeout=120):
+    # Force UTF-8 decoding: libimobiledevice emits UTF-8, but Windows' default
+    # locale (cp1252) would mangle non-ASCII device names (e.g. the ’ in a name).
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=timeout)
     except FileNotFoundError as e:
         raise ToolMissing(cmd[0]) from e
 
