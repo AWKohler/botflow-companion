@@ -640,20 +640,23 @@ def _already_running():
 
 
 def main():
-    # Single-instance: if an engine is already serving, don't start a second.
-    if _already_running():
-        log("another companion engine is already running — exiting")
-        return
     # From source, run in signer/ (legacy relative-path assumptions). When frozen
     # by PyInstaller there is no signer/ dir and the helper resolves via an
     # absolute path (sys._MEIPASS), so skip the chdir.
     signer_dir = Path(__file__).parent / "signer"
     if signer_dir.is_dir():
         os.chdir(signer_dir)
-    _restore_session()  # bring back a prior login if the tokens are still valid
-    # Don't inherit SO_REUSEADDR on Windows (it permits duplicate binds there).
+    # Single-instance via the bind itself: claim the port FIRST (no SO_REUSEADDR
+    # on Windows, where it would otherwise permit duplicate binds). If the bind
+    # fails, another engine already owns it → exit fast. Doing this BEFORE the
+    # slow session restore closes the race that let duplicates pile up.
     ThreadingHTTPServer.allow_reuse_address = (os.name != "nt")
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError:
+        log("port already in use — another companion engine is running; exiting")
+        return
+    _restore_session()  # bring back a prior login if the tokens are still valid
     log(f"{APP_NAME} engine on http://{HOST}:{PORT}")
     log("health/devices ready; auth+install live (sign-in required for install)")
     srv.serve_forever()
