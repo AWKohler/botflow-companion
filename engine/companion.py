@@ -27,6 +27,7 @@ Endpoints:
 import base64
 import json
 import os
+import platform
 import plistlib
 import sys
 import threading
@@ -42,6 +43,7 @@ from urllib.parse import urlparse, parse_qs
 # Vendored signer (apple_account.py + native anisette helper live next to us).
 sys.path.insert(0, str(Path(__file__).parent / "signer"))
 import apple_account  # noqa: E402  (AppleSigner, DeveloperPortal, ...)
+import device_backend as dev  # noqa: E402  (cross-platform device ops)
 
 HOST = "127.0.0.1"
 PORT = 17321
@@ -96,71 +98,15 @@ def emit_event(kind, title, message, job_id=None):
 # ──────────────────────────────────────────────────────────────────────────────
 # Devices (xcrun devicectl)
 # ──────────────────────────────────────────────────────────────────────────────
-def _device_type(platform_, dev_type):
-    p = (platform_ or "").lower()
-    t = (dev_type or "").lower()
-    if p == "ios" or t == "iphone":
-        return "iphone"
-    if t == "ipad":
-        return "ipad"
-    if p == "tvos" or "tv" in t:
-        return "apple_tv"
-    return "unknown"
-
-
+# Device enumeration is delegated to the platform backend (devicectl on macOS,
+# libimobiledevice on Windows) so this module stays OS-agnostic.
 def list_devices():
-    out = Path(tempfile.mkdtemp(prefix="botflow-companion-")) / "devs.json"
-    subprocess.run(
-        ["xcrun", "devicectl", "list", "devices", "--json-output", str(out)],
-        capture_output=True, timeout=20, check=False,
-    )
-    if not out.exists():
-        return []
-    data = json.loads(out.read_text())
-    devices = []
-    for d in data.get("result", {}).get("devices", []):
-        dp = d.get("deviceProperties", {})
-        hp = d.get("hardwareProperties", {})
-        cp = d.get("connectionProperties", {})
-        udid = hp.get("udid")
-        if not udid or cp.get("pairingState") != "paired":
-            continue
-        t = _device_type(hp.get("platform"), hp.get("deviceType"))
-        if t not in ("iphone", "ipad"):
-            continue
-        # `devicectl` lists every PAIRED device forever, but only assigns a
-        # transportType to devices it can currently reach:
-        #   • "wired"        → plugged in over USB right now.
-        #   • "localNetwork" → reachable wirelessly (Xcode "Connect via network")
-        #                      — this is the OTA case; keep it so the user can
-        #                      sideload without a cable.
-        # devicectl reports tunnelState "disconnected" for BOTH until an op opens
-        # a tunnel, so we must NOT gate on tunnelState. A device that is neither
-        # wired nor on the local network has no transportType (or an empty one)
-        # and is genuinely offline → skip it.
-        transport = cp.get("transportType")
-        reachable = (cp.get("tunnelState") in ("connected", "connecting"))
-        if transport not in ("wired", "localNetwork") and not reachable:
-            continue
-        # developerModeStatus ∈ enabled | disabled | restricted | <unknown>.
-        # ddiServicesAvailable = the Developer Disk Image is mounted (needed to
-        # actually launch/debug). Both come straight from devicectl.
-        devices.append({
-            "id": udid,
-            "name": dp.get("name") or "iPhone",
-            "osVersion": dp.get("osVersionNumber") or "",
-            "type": t,
-            "connected": True,
-            "developerMode": dp.get("developerModeStatus") or "unknown",
-            "ddiReady": bool(dp.get("ddiServicesAvailable")),
-            "transport": cp.get("transportType") or "",
-        })
-    return devices
+    return dev.list_devices()
 
 
 def xcode_present():
-    r = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True)
-    return r.returncode == 0 and bool(r.stdout.strip())
+    """Back-compat: whether the device backend's tooling is ready."""
+    return dev.readiness().get("ok", False)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -361,29 +307,12 @@ def _download(url, dest):
 
 def _installed_apps(device_id):
     """Return [{bundleIdentifier, name}] for apps installed on the device."""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
-            out = tf.name
-        subprocess.run(
-            ["xcrun", "devicectl", "device", "info", "apps",
-             "--device", device_id, "--json-output", out],
-            capture_output=True, text=True, timeout=60,
-        )
-        data = json.load(open(out))
-        os.unlink(out)
-        return data.get("result", {}).get("apps", []) or []
-    except Exception:
-        return []
+    return dev.installed_apps(device_id)
 
 
 def _uninstall_app(device_id, bundle_id):
     try:
-        r = subprocess.run(
-            ["xcrun", "devicectl", "device", "uninstall", "app",
-             "--device", device_id, bundle_id],
-            capture_output=True, text=True, timeout=60,
-        )
-        return r.returncode == 0
+        return dev.uninstall(device_id, bundle_id).returncode == 0
     except Exception:
         return False
 
@@ -486,11 +415,7 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         bundle_id = _bundle_id_of(signed)
 
         def _do_install():
-            return subprocess.run(
-                ["xcrun", "devicectl", "device", "install", "app",
-                 "--device", device_id, signed],
-                capture_output=True, text=True, timeout=300,
-            )
+            return dev.install(device_id, signed)
 
         _set_job(job_id, state="running", message="Installing on device…")
         emit_event("progress", "Installing", "Installing on your iPhone…", job_id)
@@ -524,11 +449,7 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         # Try to launch; first launch needs the user to Trust the dev cert.
         launched = False
         if bundle_id:
-            lr = subprocess.run(
-                ["xcrun", "devicectl", "device", "process", "launch",
-                 "--device", device_id, bundle_id],
-                capture_output=True, text=True, timeout=60,
-            )
+            lr = dev.launch(device_id, bundle_id)
             launched = lr.returncode == 0 and "RequestDenied" not in (lr.stderr or "")
             if not launched and ("not been explicitly trusted" in (lr.stderr or "") or "RequestDenied" in (lr.stderr or "")):
                 _set_job(
@@ -610,9 +531,17 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path).path
         try:
             if p == "/botflow/v1/health":
+                rd = dev.readiness()
                 return self._json(200, {
-                    "ok": True, "app": APP_NAME, "source": "mac-engine",
-                    "xcode": xcode_present(),
+                    "ok": True, "app": APP_NAME,
+                    "source": ("mac-engine" if dev.IS_MAC
+                               else "win-engine" if dev.IS_WIN else "engine"),
+                    "platform": platform.system().lower(),
+                    "xcode": rd.get("ok", False),     # back-compat: tooling ready?
+                    "toolingReady": rd.get("ok", False),
+                    "backend": rd.get("backend"),
+                    "missing": rd.get("missing", []),
+                    "setupHint": rd.get("hint", ""),
                     "loggedIn": SESSION["signer"] is not None,
                     "appleId": SESSION["appleId"], "team": SESSION["team"],
                     "accountType": SESSION["accountType"],

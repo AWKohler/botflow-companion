@@ -60,7 +60,10 @@ CLIENT_INFO = (
 XCODE_VERSION = "15.2 (15C500b)"
 USER_AGENT_GSA = "akd/1.0 CFNetwork/1494 Darwin/23.4.0"
 
-DEFAULT_ANISETTE_URL = "http://localhost:6969"
+# On macOS/Linux a native anisette provider is used; on Windows (no native
+# provider) the engine falls back to this HTTP anisette server. Override with
+# BOTFLOW_ANISETTE_URL to point at a self-hosted/remote anisette instance.
+DEFAULT_ANISETTE_URL = os.environ.get("BOTFLOW_ANISETTE_URL", "http://localhost:6969")
 
 
 # ─── Anisette Provider ───────────────────────────────────────────────────────

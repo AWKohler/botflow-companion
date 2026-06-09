@@ -1,0 +1,13 @@
+# Botflow Companion engine dependencies.
+#
+# NOTE: these are imported LAZILY (inside auth/signing functions), so the engine
+# can start and serve /health + /devices without them. They're required for
+# Apple-ID auth and IPA signing.
+requests>=2.31
+cryptography>=42
+srp>=1.0.21
+# Anisette generation on non-Apple hosts (unicorn-based ADI emulation) + IPA
+# inspection during signing.
+unicorn>=2.1
+lief>=0.16
+Anisette>=1.2
