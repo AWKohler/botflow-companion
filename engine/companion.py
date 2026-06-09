@@ -626,7 +626,24 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": str(e)})
 
 
+def _already_running():
+    """True if a healthy companion engine already owns the port. On Windows
+    SO_REUSEADDR lets multiple processes bind the same port, so we must guard
+    against duplicate engines (e.g. the tray supervisor racing) ourselves."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://{HOST}:{PORT}/botflow/v1/health", timeout=1.5) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def main():
+    # Single-instance: if an engine is already serving, don't start a second.
+    if _already_running():
+        log("another companion engine is already running — exiting")
+        return
     # From source, run in signer/ (legacy relative-path assumptions). When frozen
     # by PyInstaller there is no signer/ dir and the helper resolves via an
     # absolute path (sys._MEIPASS), so skip the chdir.
@@ -634,6 +651,8 @@ def main():
     if signer_dir.is_dir():
         os.chdir(signer_dir)
     _restore_session()  # bring back a prior login if the tokens are still valid
+    # Don't inherit SO_REUSEADDR on Windows (it permits duplicate binds there).
+    ThreadingHTTPServer.allow_reuse_address = (os.name != "nt")
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     log(f"{APP_NAME} engine on http://{HOST}:{PORT}")
     log("health/devices ready; auth+install live (sign-in required for install)")
