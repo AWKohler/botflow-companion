@@ -282,30 +282,22 @@ def enable_devmode(udid):
         from pymobiledevice3.services.amfi import AmfiService
     except Exception:
         return (False, "Developer Mode requires the pymobiledevice3 component (missing from this build).")
+    # REVEAL is the reliable action (this is what Xcode/3uTools send) — it makes
+    # the Developer Mode row appear in Settings → Privacy & Security. We do this
+    # as the primary step. We deliberately DON'T auto-call enable_developer_mode()
+    # because it force-reboots the device immediately; the user enables it from
+    # Settings instead (a passcode-confirmed reboot they expect).
     try:
-        lockdown = create_using_usbmux(serial=udid)
-        amfi = AmfiService(lockdown)
-        # Make the option visible in Settings first (fixes 'it never appears'),
-        # then arm it — the device reboots and the user confirms post-restart.
-        try:
-            amfi.reveal_developer_mode_option_in_ui()
-        except Exception:
-            pass
-        amfi.enable_developer_mode()
-        return (True, "Developer Mode requested — your device will restart. After it reboots, "
-                      "tap “Turn On” and enter your passcode.")
+        amfi = AmfiService(create_using_usbmux(serial=udid))
+        amfi.reveal_developer_mode_option_in_ui()
+        return (True, "Developer Mode now appears on your device under "
+                      "Settings → Privacy & Security → Developer Mode. Turn it on there — "
+                      "the device will restart to confirm.")
     except Exception as e:
         msg = str(e)
-        if "already" in msg.lower() or "enabled" in msg.lower():
-            return (True, "Developer Mode is already being enabled — confirm on your device after it reboots.")
-        # Last resort: at least reveal the toggle so the user can flip it manually.
-        try:
-            lockdown = create_using_usbmux(serial=udid)
-            AmfiService(lockdown).reveal_developer_mode_option_in_ui()
-            return (True, "Opened Developer Mode in Settings → Privacy & Security on your device. "
-                          "Turn it on there, then reboot.")
-        except Exception:
-            return (False, msg or "Could not enable Developer Mode.")
+        if "passcode" in msg.lower() or "locked" in msg.lower():
+            return (False, "Unlock your device, then click Enable Developer Mode again.")
+        return (False, msg or "Could not reveal Developer Mode. Make sure the device is unlocked.")
 
 
 def installed_apps(udid):
