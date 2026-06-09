@@ -278,18 +278,26 @@ def enable_devmode(udid):
         _run(["xcrun", "devicectl", "device", "info", "details", "--device", udid], timeout=30)
         return (True, "On your iPhone: Settings → Privacy & Security → Developer Mode → On, then reboot.")
     try:
+        import asyncio
         from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.amfi import AmfiService
     except Exception:
         return (False, "Developer Mode requires the pymobiledevice3 component (missing from this build).")
-    # REVEAL is the reliable action (this is what Xcode/3uTools send) — it makes
-    # the Developer Mode row appear in Settings → Privacy & Security. We do this
-    # as the primary step. We deliberately DON'T auto-call enable_developer_mode()
-    # because it force-reboots the device immediately; the user enables it from
-    # Settings instead (a passcode-confirmed reboot they expect).
+
+    # pymobiledevice3 4.x is async — create_using_usbmux and the amfi methods are
+    # coroutines and MUST be awaited (calling them synchronously silently returns
+    # an un-run coroutine, which is why the reveal did nothing). Run in an event
+    # loop on this handler thread. REVEAL is the reliable action (what Xcode/
+    # 3uTools send) — it makes the Developer Mode row appear in Settings. We don't
+    # auto-call enable_developer_mode() (it force-reboots immediately); the user
+    # toggles it from Settings (a passcode-confirmed reboot they expect).
+    async def _reveal():
+        lockdown = await create_using_usbmux(serial=udid)
+        amfi = AmfiService(lockdown)
+        await amfi.reveal_developer_mode_option_in_ui()
+
     try:
-        amfi = AmfiService(create_using_usbmux(serial=udid))
-        amfi.reveal_developer_mode_option_in_ui()
+        asyncio.run(_reveal())
         return (True, "Developer Mode now appears on your device under "
                       "Settings → Privacy & Security → Developer Mode. Turn it on there — "
                       "the device will restart to confirm.")
