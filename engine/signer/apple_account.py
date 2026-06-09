@@ -310,8 +310,14 @@ class LinuxAnisetteProvider(AnisetteProvider):
 
     @staticmethod
     def is_available() -> bool:
-        """True if running on Linux and anisette package is importable."""
-        if platform.system() != "Linux":
+        """True on any non-macOS host where the anisette package is importable.
+
+        The emulation is pure-Python + Unicorn (no native ADI binary, no server),
+        so it works on Linux AND Windows — macOS uses NativeAnisetteProvider
+        (AOSKit) instead. This is what lets Apple-ID sign-in work on Windows
+        without a third-party anisette server.
+        """
+        if platform.system() == "Darwin":
             return False
         try:
             import anisette  # noqa: F401
