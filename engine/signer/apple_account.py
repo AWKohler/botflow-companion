@@ -66,6 +66,33 @@ USER_AGENT_GSA = "akd/1.0 CFNetwork/1494 Darwin/23.4.0"
 DEFAULT_ANISETTE_URL = os.environ.get("BOTFLOW_ANISETTE_URL", "http://localhost:6969")
 
 
+def _find_zsign():
+    """Locate the zsign binary across platforms.
+
+    macOS/Linux usually have it on PATH. On Windows it's built locally (it isn't
+    packaged), so also search known locations and a BOTFLOW_ZSIGN override.
+    Returns a full path (so co-located DLLs load) or None.
+    """
+    exe = "zsign.exe" if platform.system() == "Windows" else "zsign"
+    env = os.environ.get("BOTFLOW_ZSIGN")
+    candidates = []
+    if env:
+        candidates.append(Path(env))
+    if platform.system() == "Windows":
+        candidates += [
+            # Built here, then copied next to its mingw64 DLLs so they resolve.
+            Path(r"C:\msys64\mingw64\bin") / exe,
+            Path.home() / "zsign" / exe,
+        ]
+    # Bundled with a frozen build (engine/tools or _MEIPASS/tools).
+    base = Path(getattr(sys, "_MEIPASS", str(Path(__file__).parent)))
+    candidates.append(base / "tools" / exe)
+    for c in candidates:
+        if c.exists():
+            return str(c)
+    return shutil.which("zsign") or shutil.which(exe)
+
+
 # ─── Anisette Provider ───────────────────────────────────────────────────────
 
 class AnisetteProvider:
@@ -1621,11 +1648,13 @@ class AppleSigner:
                 f.write(profile_bytes)
             print(f"[+] Saved provisioning profile: {profile_path}")
 
-            # Sign with zsign
-            if shutil.which("zsign"):
+            # Sign with zsign (cross-platform). Preferred everywhere; on Windows
+            # it's the only signer (no codesign), located via _find_zsign().
+            zsign_bin = _find_zsign()
+            if zsign_bin:
                 import subprocess
                 cmd = [
-                    "zsign",
+                    zsign_bin,
                     "-k", p12_path,
                     "-m", profile_path,
                     "-o", output_path,
