@@ -329,19 +329,17 @@ def _is_free_limit_error(text):
     return any(m in t for m in _FREE_LIMIT_MARKERS)
 
 
-def _prune_botflow_apps(device_id, keep_bundle_id=None):
-    """Free up free-profile slots by removing OUR OWN stale dev installs only
-    (anything in the com.botflow.* namespace), never the user's other apps.
-    Returns the list of bundle ids removed."""
-    removed = []
+def _prunable_botflow_apps(device_id, keep_bundle_id=None):
+    """Candidate apps we may remove ONLY when at the free-install limit: our own
+    com.botflow.* dev installs (never the user's other apps), excluding the one
+    we're installing. The caller removes these one at a time, retrying after
+    each, so we free the MINIMUM number of slots needed — not all of them."""
+    out = []
     for a in _installed_apps(device_id):
         bid = a.get("bundleIdentifier", "") or ""
-        if bid == keep_bundle_id:
-            continue
-        if "com.botflow" in bid.lower():
-            if _uninstall_app(device_id, bid):
-                removed.append(bid)
-    return removed
+        if bid and bid != keep_bundle_id and "com.botflow" in bid.lower():
+            out.append(bid)
+    return out
 
 
 def _account_type_from_ipa(signed_ipa):
@@ -422,16 +420,21 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         r = _do_install()
         _job_log(job_id, (r.stdout or "").strip()[-500:])
 
-        # Free accounts cap sideloaded apps at 3. If we hit that, clear our OWN
-        # stale com.botflow.* dev installs and retry once before giving up.
+        # Free accounts cap sideloaded apps at 3. ONLY when we actually hit that
+        # limit do we free space — and then we remove our OWN com.botflow.* builds
+        # ONE AT A TIME, retrying after each, so we free the minimum number of
+        # slots needed rather than wiping every Botflow app on the device.
         if r.returncode != 0 and _is_free_limit_error((r.stderr or "") + (r.stdout or "")):
-            emit_event("progress", "Freeing space",
-                       "Free Apple account allows 3 apps — removing old Botflow builds…", job_id)
-            removed = _prune_botflow_apps(device_id, keep_bundle_id=bundle_id)
-            if removed:
-                _job_log(job_id, f"pruned stale botflow apps: {removed}")
-                r = _do_install()
-                _job_log(job_id, (r.stdout or "").strip()[-500:])
+            candidates = _prunable_botflow_apps(device_id, keep_bundle_id=bundle_id)
+            for bid in candidates:
+                if not (r.returncode != 0 and _is_free_limit_error((r.stderr or "") + (r.stdout or ""))):
+                    break  # we're under the limit now — stop removing.
+                emit_event("progress", "Freeing space",
+                           "Free Apple account is at its 3-app limit — removing one old Botflow build…", job_id)
+                if _uninstall_app(device_id, bid):
+                    _job_log(job_id, f"removed one botflow app to free a slot: {bid}")
+                    r = _do_install()
+                    _job_log(job_id, (r.stdout or "").strip()[-500:])
             if r.returncode != 0 and _is_free_limit_error((r.stderr or "") + (r.stdout or "")):
                 msg = ("Your iPhone has reached the free Apple account limit of 3 "
                        "installed apps. Delete an app you installed via Botflow/Xcode "
