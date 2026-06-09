@@ -22,6 +22,24 @@ HEALTH = "http://127.0.0.1:17321/botflow/v1/health"
 UI_URL = "http://127.0.0.1:17321/"
 
 
+def _setup_logging(name):
+    """Always redirect stdout/stderr to a per-mode log file. Critical under
+    pythonw (windowless), where sys.stdout is None and the engine's print() calls
+    would otherwise raise and kill the process before it binds. Also gives us real
+    logs to debug with. (Tail the file during dev instead of the console.)"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    logdir = os.path.join(base, "BotflowCompanion", "logs")
+    try:
+        os.makedirs(logdir, exist_ok=True)
+        f = open(os.path.join(logdir, f"{name}.log"), "a",
+                 buffering=1, encoding="utf-8", errors="replace")
+        sys.stdout = f
+        sys.stderr = f
+    except Exception:
+        import io
+        sys.stdout = sys.stderr = io.StringIO()  # last resort: never crash on print
+
+
 def _self_cmd(mode):
     """Command to relaunch THIS binary in another mode (frozen or from source)."""
     if getattr(sys, "frozen", False):
@@ -148,10 +166,13 @@ def run_tray():
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "--tray"
     if mode == "--engine":
+        _setup_logging("engine")
         run_engine()
     elif mode == "--window":
+        _setup_logging("window")
         run_window()
     else:
+        _setup_logging("tray")
         run_tray()
 
 
