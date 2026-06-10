@@ -75,4 +75,9 @@ struct EngineClient {
         try await post("/botflow/v1/auth/2fa", body: ["code": code], timeout: 60)
     }
     static func logout() async throws { let _: LoginResponse = try await post("/botflow/v1/auth/logout", body: [:]) }
+
+    struct DevModeResponse: Decodable { let ok: Bool?; let message: String?; let error: String? }
+    static func enableDeveloperMode(deviceId: String) async throws -> DevModeResponse {
+        try await post("/botflow/v1/devmode/enable", body: ["deviceId": deviceId], timeout: 45)
+    }
 }

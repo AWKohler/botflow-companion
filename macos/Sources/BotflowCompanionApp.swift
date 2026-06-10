@@ -238,6 +238,8 @@ struct CompanionView: View {
 struct DeviceCard: View {
     let device: EngineClient.Device
     @State private var showGuide = false
+    @State private var dmBusy = false
+    @State private var dmMessage: String? = nil
 
     private var ready: Bool { device.devModeEnabled }
 
@@ -310,12 +312,37 @@ struct DeviceCard: View {
 
     @ViewBuilder private var devModeGuide: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // One-click trigger (reveals + arms Developer Mode via pymobiledevice3).
+            Button {
+                dmBusy = true; dmMessage = nil
+                Task {
+                    do {
+                        let r = try await EngineClient.enableDeveloperMode(deviceId: device.id)
+                        dmMessage = r.message ?? r.error ?? (r.ok == true ? "Requested." : "Failed.")
+                    } catch {
+                        dmMessage = "Couldn’t reach the companion engine."
+                    }
+                    dmBusy = false
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    if dmBusy { ProgressView().controlSize(.small) }
+                    Text(dmBusy ? "Enabling…" : "Enable Developer Mode")
+                }
+            }
+            .buttonStyle(.borderedProminent).controlSize(.small).disabled(dmBusy)
+
+            if let m = dmMessage {
+                Text(m).font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) { showGuide.toggle() }
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: showGuide ? "chevron.down" : "chevron.right").font(.caption2)
-                    Text(showGuide ? "Hide setup steps" : "Set up Developer Mode")
+                    Text(showGuide ? "Hide manual steps" : "Or set it up manually")
                         .font(.caption.weight(.medium))
                 }.foregroundStyle(Color.accentColor)
             }.buttonStyle(.plain)

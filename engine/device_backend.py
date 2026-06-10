@@ -273,10 +273,8 @@ def enable_devmode(udid):
     the Developer Mode toggle appear in Settings AND arms it. libimobiledevice's
     older builds ship no devmode tool, so this is the cross-platform path.
     """
-    if IS_MAC:
-        # On macOS the toggle is reached through Settings after a dev connection.
-        _run(["xcrun", "devicectl", "device", "info", "details", "--device", udid], timeout=30)
-        return (True, "On your iPhone: Settings → Privacy & Security → Developer Mode → On, then reboot.")
+    # pymobiledevice3 is cross-platform (talks to usbmux, which macOS and the
+    # Windows AMDS service both provide) — so the same reveal works everywhere.
     try:
         import asyncio
         from pymobiledevice3.lockdown import create_using_usbmux

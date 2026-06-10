@@ -39,7 +39,8 @@ PY="$ENGINE/.venv/bin/python"
   --paths "$ENGINE/signer" \
   --add-binary "$ENGINE/signer/anisette_helper:." \
   --collect-all anisette --collect-all srp --collect-all lief --collect-all unicorn \
-  --hidden-import apple_account \
+  --collect-all pymobiledevice3 \
+  --hidden-import apple_account --hidden-import device_backend --hidden-import ui \
   "$ENGINE/companion.py"
 test -x "$ENGINE/dist/botflow-engine" || { echo "engine freeze failed"; exit 1; }
 
