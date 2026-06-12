@@ -1601,9 +1601,12 @@ class AppleSigner:
                  udid: str = None, bundle_id: str = None) -> str:
         """
         Full pipeline: authenticate → provision → sign IPA.
-        
+
         If already logged in, reuses the session.
-        Returns the path to the signed IPA.
+        Returns the path to the signed IPA (output_path), which is guaranteed
+        to exist on return. Raises RuntimeError if the IPA could not be signed
+        (no signer available, or the signer failed) — callers must never
+        install the input IPA as a fallback.
         """
         import shutil
         import zipfile
@@ -1615,6 +1618,13 @@ class AppleSigner:
         # Read bundle ID from IPA if not provided
         if not bundle_id:
             bundle_id = self._get_bundle_id_from_ipa(ipa_path)
+            if not bundle_id:
+                # An empty bundle id would propagate into add_app_id("") and a
+                # broken provisioning profile; fail here with a real message.
+                raise RuntimeError(
+                    f"could not determine bundle id from {ipa_path} "
+                    "(no Payload/*.app/Info.plist with CFBundleIdentifier)"
+                )
 
         app_name = bundle_id.split(".")[-1] if bundle_id else "App"
 
@@ -1671,7 +1681,9 @@ class AppleSigner:
                     print(f"[!] zsign failed: {result.stderr}")
                     # Keep temp files for manual signing
                     print(f"[*] Manual signing files saved in: {temp_dir}")
-                    return ""
+                    raise RuntimeError(
+                        f"zsign failed to sign the IPA: {(result.stderr or result.stdout or '').strip()[-300:]}"
+                    )
             else:
                 # No zsign — try macOS codesign (macOS-only, works for dev signing)
                 if shutil.which("codesign") and shutil.which("security"):
@@ -1681,8 +1693,15 @@ class AppleSigner:
                     )
                     if signed:
                         return output_path
+                    raise RuntimeError(
+                        "codesign was available but failed to sign the IPA "
+                        f"(materials kept in {temp_dir})"
+                    )
 
-                # Final fallback — save files to workspace dir for manual use
+                # No signer available. Save the materials for manual signing,
+                # then fail loudly — returning the unsigned IPA here used to let
+                # callers install an unsigned (or nonexistent) file and die with
+                # an opaque devicectl/ideviceinstaller error.
                 ws = Path(output_path).parent
                 app_stem = Path(ipa_path).stem
                 final_p12 = str(ws / f"{app_stem}_cert.p12")
@@ -1704,7 +1723,10 @@ class AppleSigner:
                 print("    Or install zsign and run:")
                 print(f"      zsign -k {final_p12} -m {final_profile} -o {output_path} {final_ipa}")
                 print("=" * 60)
-                return final_ipa
+                raise RuntimeError(
+                    "no code signer available (zsign/codesign) — cannot sign the IPA. "
+                    f"Signing materials for manual use were saved to {ws}."
+                )
 
         finally:
             # Clean up temp dir (but preserve if signing failed without zsign)

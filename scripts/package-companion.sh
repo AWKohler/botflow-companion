@@ -49,8 +49,18 @@ echo "==> 2/4  Build macOS app (Release)"
 DERIVED="$DIST/DerivedData"
 xcodebuild -project "$MACOS/$APP_NAME.xcodeproj" -scheme "$APP_NAME" \
   -configuration Release -derivedDataPath "$DERIVED" build >/dev/null
-APP="$DERIVED/Build/Products/Release/$APP_NAME.app"
-test -d "$APP" || { echo "app build failed"; exit 1; }
+# Find the built .app by globbing the products dir rather than reconstructing
+# the path from APP_NAME — the Xcode product name can diverge from the scheme.
+PRODUCTS="$DERIVED/Build/Products/Release"
+shopt -s nullglob
+APPS=("$PRODUCTS"/*.app)
+shopt -u nullglob
+if [[ ${#APPS[@]} -eq 0 ]]; then
+  echo "app build failed: no .app found in $PRODUCTS" >&2; exit 1
+elif [[ ${#APPS[@]} -gt 1 ]]; then
+  echo "app build ambiguous: multiple .app bundles in $PRODUCTS: ${APPS[*]}" >&2; exit 1
+fi
+APP="${APPS[0]}"
 
 echo "==> 3/4  Bundle engine into the app"
 mkdir -p "$APP/Contents/Resources/engine"

@@ -301,9 +301,21 @@ def _download(url, dest):
     import requests
     with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(chunk_size=1 << 16):
                 f.write(chunk)
+    # A 200 response isn't enough: an expired/invalid download token can return
+    # an HTML or JSON error page, which would only fail much later as an opaque
+    # device install error. An IPA is a zip, so it must start with "PK".
+    with open(dest, "rb") as f:
+        magic = f.read(2)
+    if magic != b"PK":
+        raise RuntimeError(
+            "Downloaded build is not an IPA (got "
+            f"{content_type or 'unknown content-type'}); the download link may "
+            "have expired — rebuild or refresh and try again."
+        )
 
 
 def _installed_apps(device_id):
@@ -396,6 +408,13 @@ def run_install(job_id, device_id, ipa_url, ipa_path):
         emit_event("progress", "Signing build", "Signing the app for your iPhone…", job_id)
         signed = str(work / "signed.ipa")
         signer.sign_ipa(ipa_path, output_path=signed, udid=device_id)
+        # sign_ipa raises on failure, but belt-and-braces: never hand a file
+        # that was never written to the device installer.
+        if not Path(signed).exists():
+            msg = "Signing produced no output IPA (no code signer available?)."
+            _set_job(job_id, state="failed", error=msg)
+            emit_event("error", "Signing failed", msg, job_id)
+            return
         _job_log(job_id, f"signed: {signed}")
 
         # The embedded profile tells us authoritatively whether this is a free
