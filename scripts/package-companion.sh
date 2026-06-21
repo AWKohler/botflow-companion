@@ -67,31 +67,53 @@ mkdir -p "$APP/Contents/Resources/engine"
 cp "$ENGINE/dist/botflow-engine" "$APP/Contents/Resources/engine/botflow-engine"
 chmod +x "$APP/Contents/Resources/engine/botflow-engine"
 
-echo "==> 4/4  Sign + zip"
+echo "==> 4/4  Sign + notarize + .dmg"
+ENT="$MACOS/Companion.entitlements"
+mkdir -p "$DIST"
+DMG="$DIST/$APP_NAME.dmg"
+rm -f "$DMG"
+
 if [[ -n "${DEVELOPER_ID:-}" ]]; then
-  # Sign nested binaries first, then the app (hardened runtime for notarization).
-  codesign --force --options runtime --timestamp \
+  # Hardened runtime + entitlements (CPython/native deps need them). Sign the
+  # nested engine first, then the app.
+  codesign --force --options runtime --timestamp --entitlements "$ENT" \
     --sign "$DEVELOPER_ID" "$APP/Contents/Resources/engine/botflow-engine"
-  codesign --force --options runtime --timestamp --deep \
+  codesign --force --options runtime --timestamp --entitlements "$ENT" \
     --sign "$DEVELOPER_ID" "$APP"
+  codesign --verify --deep --strict "$APP" || { echo "codesign verify failed"; exit 1; }
+
+  if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    echo "    notarizing app…"
+    APPZIP="$DIST/_notarize.zip"; rm -f "$APPZIP"
+    ditto -c -k --keepParent "$APP" "$APPZIP"
+    xcrun notarytool submit "$APPZIP" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"      # app now validates offline
+    rm -f "$APPZIP"
+  else
+    echo "    (DEVELOPER_ID set but no NOTARY_PROFILE — signed, NOT notarized)"
+  fi
 else
   echo "    (no DEVELOPER_ID — ad-hoc signing; users must right-click → Open)"
   codesign --force --deep --sign - "$APP"
 fi
 
-mkdir -p "$DIST"
-ZIP="$DIST/$APP_NAME.zip"
-rm -f "$ZIP"
-ditto -c -k --keepParent "$APP" "$ZIP"
+# Build the .dmg (drag-to-Applications layout).
+STAGE="$(mktemp -d)"
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+rm -rf "$STAGE"
 
-if [[ -n "${NOTARY_PROFILE:-}" ]]; then
-  echo "==> Notarize"
-  xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
-  xcrun stapler staple "$APP"
-  rm -f "$ZIP"; ditto -c -k --keepParent "$APP" "$ZIP"
+if [[ -n "${DEVELOPER_ID:-}" ]]; then
+  codesign --force --timestamp --sign "$DEVELOPER_ID" "$DMG"
+  if [[ -n "${NOTARY_PROFILE:-}" ]]; then
+    echo "    notarizing dmg…"
+    xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+    xcrun stapler staple "$DMG"     # dmg validates offline too
+  fi
 fi
 
 mkdir -p "$WEB_PUBLIC"
-cp "$ZIP" "$WEB_PUBLIC/$APP_NAME.zip"
-echo "==> Done: $ZIP"
-echo "    Published to: $WEB_PUBLIC/$APP_NAME.zip"
+cp "$DMG" "$WEB_PUBLIC/$APP_NAME.dmg"
+echo "==> Done: $DMG"
+echo "    Published to: $WEB_PUBLIC/$APP_NAME.dmg"
