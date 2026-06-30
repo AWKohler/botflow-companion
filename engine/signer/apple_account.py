@@ -917,9 +917,29 @@ class DeveloperPortal:
             raise Exception("No development teams found")
         return teams
 
+    @staticmethod
+    def _team_is_free(t) -> bool:
+        """A free Xcode personal team (fp22 / XCODE_FREE_USER) vs a paid program."""
+        roles = ((t.get("currentTeamMember") or {}).get("roles")) or []
+        if any("FREE" in str(r).upper() for r in roles):
+            return True
+        for m in (t.get("memberships") or []):
+            if (m.get("membershipProductId") or "").lower() == "fp22":
+                return True
+            if "free provisioning" in (m.get("name") or "").lower():
+                return True
+        return not t.get("memberships")
+
     def select_team(self, team_id: str = None) -> str:
-        """Select a team (auto-selects if only one)."""
+        """Select a team. When the Apple ID belongs to several, prefer the PAID
+        one (a paid membership gives 1-year signing / 100 devices / no 3-app
+        limit). Never prompts — the companion runs headless."""
         teams = self.list_teams()
+        # Log every team so account-type confusion is debuggable from the engine log.
+        print(f"[*] Teams for this Apple ID ({len(teams)}):")
+        for t in teams:
+            kind = "free" if self._team_is_free(t) else "PAID"
+            print(f"      - {t.get('name','?')} ({t.get('teamId')}) [{kind}]")
 
         if team_id:
             for t in teams:
@@ -934,20 +954,12 @@ class DeveloperPortal:
             print(f"[+] Team: {teams[0].get('name', '')} ({self.team_id})")
             return self.team_id
 
-        # Multiple teams — let user choose
-        print("[*] Multiple teams found:")
-        for i, t in enumerate(teams):
-            print(f"  [{i}] {t.get('name', 'Unknown')} ({t['teamId']})")
-
-        while True:
-            try:
-                choice = int(input("Select team number: "))
-                if 0 <= choice < len(teams):
-                    self.team_id = teams[choice]["teamId"]
-                    return self.team_id
-            except (ValueError, IndexError):
-                pass
-            print("[!] Invalid choice")
+        paid = [t for t in teams if not self._team_is_free(t)]
+        chosen = paid[0] if paid else teams[0]
+        self.team_id = chosen["teamId"]
+        print(f"[+] Selected {'paid' if paid else 'free'} team: "
+              f"{chosen.get('name','')} ({self.team_id})")
+        return self.team_id
 
     def register_device(self, name: str, udid: str) -> dict:
         """Register a device UDID with the developer portal."""
