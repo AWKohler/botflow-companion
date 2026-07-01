@@ -589,7 +589,7 @@ class AppleAuth:
         M = usr.process_challenge(r["s"], r["B"])
 
         if M is None:
-            raise Exception("SRP challenge failed — wrong password?")
+            raise Exception("Incorrect Apple ID or password.")
 
         r2 = self._gsa_request({
             "c": r["c"],
@@ -602,12 +602,16 @@ class AppleAuth:
         ec = status.get("ec", -1)
 
         if ec != 0:
-            em = status.get("em", "Unknown error")
-            if ec == -20101:
-                raise Exception("Invalid Apple ID or password")
-            elif ec == -22406:
-                raise Exception("Apple ID locked for security reasons")
-            raise Exception(f"GSA complete failed (ec={ec}): {em}")
+            em = (status.get("em") or "").strip()
+            low = em.lower()
+            # Apple returns -22406 for a plain wrong password too — don't cry
+            # "locked". Prefer Apple's own message text to classify.
+            if "lock" in low or "disabl" in low:
+                raise Exception("This Apple ID is locked or disabled. Reset it at appleid.apple.com, then try again.")
+            if ec in (-20101, -22406) or "incorrect" in low or "not correct" in low \
+                    or "wrong" in low or "password" in low:
+                raise Exception("Incorrect Apple ID or password.")
+            raise Exception(f"Sign-in failed: {em or f'error {ec}'}")
 
         # Verify server proof
         usr.verify_session(r2["M2"])
