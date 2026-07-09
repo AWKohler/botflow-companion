@@ -1184,6 +1184,15 @@ class AppleSigner:
             else:
                 self.auth.send_2fa_sms()
 
+            # The engine drives 2FA over HTTP (POST /botflow/v1/auth/2fa); this
+            # interactive loop is CLI-only. In the frozen/headless engine sys.stdin
+            # is None, so input() below raises "lost sys.stdin" — guard it so the
+            # failure is an actionable error, never a hang.
+            if sys.stdin is None or not sys.stdin.isatty():
+                raise RuntimeError(
+                    "2FA required but no interactive console; complete 2FA via the "
+                    "engine HTTP flow (POST /botflow/v1/auth/2fa)"
+                )
             # Get code from user
             max_attempts = 3
             for attempt in range(max_attempts):
@@ -1648,7 +1657,14 @@ class AppleSigner:
             # Try to get UDID from connected device
             udid = self._get_device_udid()
             if not udid:
-                udid = input("Enter device UDID: ").strip()
+                # The engine always passes the target device's udid; reaching here
+                # means none was given AND none is connected. The frozen/headless
+                # engine has no console, so input() would raise "lost sys.stdin" /
+                # EOFError and hang the install — fail loudly instead.
+                raise RuntimeError(
+                    "no device UDID: pass a udid or connect the target device "
+                    "(the headless companion engine cannot prompt for one)"
+                )
 
         # Provision
         private_key_pem, profile_bytes, cert_der, actual_bundle_id = self.provision(
